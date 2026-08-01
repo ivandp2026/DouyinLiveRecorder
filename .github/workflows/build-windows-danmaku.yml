@@ -59,6 +59,16 @@ jobs:
           Copy-Item README.md,LICENSE dist/DouyinLiveRecorder/ -Force
           Copy-Item docs dist/DouyinLiveRecorder/docs -Recurse -Force
 
+      - name: Bundle FFmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $ffmpegExe = Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg\tools" -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          if (-not $ffmpegExe) { throw "Could not locate the installed ffmpeg.exe" }
+          New-Item -ItemType Directory -Force dist/DouyinLiveRecorder/ffmpeg | Out-Null
+          Copy-Item $ffmpegExe.FullName dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe -Force
+          & dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe -version
+
       - name: Create ZIP
         shell: pwsh
         run: |
