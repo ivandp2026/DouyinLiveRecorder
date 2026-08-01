@@ -434,6 +434,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
                 highlight_options=danmaku_highlight_options,
                 relay_executable=danmaku_relay_executable,
                 relay_port=danmaku_relay_port,
+                duplicate_window=danmaku_duplicate_window,
             )
             danmaku_session.start()
             logger.info(f"[{record_name}] 抖音弹幕分析已启动")
@@ -1878,6 +1879,9 @@ while True:
         f'{script_path}/vendor/douyinlive/douyinLive.exe'
     ) or f'{script_path}/vendor/douyinlive/douyinLive.exe'
     danmaku_relay_port = int(read_config_value(config, '弹幕分析', '内置弹幕组件端口', 1088))
+    danmaku_duplicate_window = int(
+        read_config_value(config, '弹幕分析', '重复弹幕过滤时间(秒)', 60)
+    )
     danmaku_highlight_options = {
         'window': int(read_config_value(config, '弹幕分析', '热点统计窗口(秒)', 10)),
         'baseline_window': int(read_config_value(config, '弹幕分析', '热点基线窗口(秒)', 60)),

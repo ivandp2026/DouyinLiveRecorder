@@ -79,6 +79,24 @@ class DanmakuTests(unittest.TestCase):
             self.assertIn("collector", payload)
             self.assertEqual(payload["collector"]["raw_event_count"], 0)
 
+    def test_duplicate_chat_is_not_saved_or_counted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = DanmakuSession(
+                str(Path(directory) / "record.ts"),
+                "https://live.douyin.com/123", "", duplicate_window=60,
+            )
+            session.message_path.parent.mkdir(parents=True, exist_ok=True)
+            session.message_file = session.message_path.open("w", encoding="utf-8", buffering=1)
+            event = {"method": "WebcastChatMessage", "content": "  福袋口令   666  "}
+            session._consume(10, event)
+            session._consume(20, event)
+            session._consume(71, event)
+            session.stop()
+            lines = session.message_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines, ["[00:00:10] 福袋口令 666", "[00:01:11] 福袋口令 666"])
+            self.assertEqual(sum(row.comment_count for row in session.rows), 2)
+            self.assertEqual(session.duplicate_chat_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,13 +144,14 @@ class DanmakuSession:
 
     def __init__(self, video_path: str, room_url: str, cookie: str, command: str = "",
                  highlight_options: dict | None = None, relay_executable: str = "",
-                 relay_port: int = 1088):
+                 relay_port: int = 1088, duplicate_window: int = 60):
         self.prefix = output_prefix(video_path)
         self.room_url = room_url
         self.cookie = cookie
         self.command = command
         self.relay_executable = relay_executable
         self.relay_port = relay_port
+        self.duplicate_window = max(0, duplicate_window)
         self.highlight_options = highlight_options or {}
         self.started_at = time.monotonic()
         self.stop_event = threading.Event()
@@ -163,12 +164,19 @@ class DanmakuSession:
         self.raw_event_count = 0
         self.system_status: dict = {}
         self.last_error = ""
+        self.seen_content: dict[str, int] = {}
+        self.unique_chat_count = 0
+        self.duplicate_chat_count = 0
+        self.message_path = self.prefix.with_suffix(".danmaku.txt")
+        self.message_file = None
         self.reader_thread: threading.Thread | None = None
         self.writer_thread: threading.Thread | None = None
         self._stop_lock = threading.Lock()
         self._stop_result: tuple[Path, Path] | None = None
 
     def start(self) -> None:
+        self.message_path.parent.mkdir(parents=True, exist_ok=True)
+        self.message_file = self.message_path.open("w", encoding="utf-8-sig", buffering=1)
         if not self.command:
             ensure_douyin_relay(self.relay_executable, self.relay_port)
             self.reader_thread = threading.Thread(target=self._read_relay_events, daemon=True)
@@ -268,7 +276,21 @@ class DanmakuSession:
         row = self._ensure_row(second)
         event_type = str(event.get("type") or event.get("method") or "")
         if event_type in CHAT_TYPES:
+            content = " ".join(str(event.get("content") or "").split())
+            if not content:
+                return
+            previous_second = self.seen_content.get(content)
+            if (previous_second is not None and self.duplicate_window > 0 and
+                    second - previous_second <= self.duplicate_window):
+                self.duplicate_chat_count += 1
+                return
+            self.seen_content[content] = second
+            self.unique_chat_count += 1
             row.comment_count += 1
+            if self.message_file:
+                hours, remainder = divmod(second, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                self.message_file.write(f"[{hours:02d}:{minutes:02d}:{seconds:02d}] {content}\n")
             user = event.get("user") if isinstance(event.get("user"), dict) else {}
             user_id = (event.get("user_id") or event.get("userId") or event.get("nickname")
                        or user.get("id") or user.get("idStr") or user.get("nickname"))
@@ -310,6 +332,10 @@ class DanmakuSession:
                 self.reader_thread.join(timeout=2)
             if self.writer_thread:
                 self.writer_thread.join(timeout=2)
+            if self.message_file:
+                self.message_file.flush()
+                self.message_file.close()
+                self.message_file = None
             self._ensure_row(max(0, int(time.monotonic() - self.started_at)))
             csv_path = self.prefix.with_suffix(".danmaku.csv")
             json_path = self.prefix.with_suffix(".highlights.json")
@@ -324,6 +350,10 @@ class DanmakuSession:
                 "collector": {
                     "connected": self.connected,
                     "raw_event_count": self.raw_event_count,
+                    "unique_chat_count": self.unique_chat_count,
+                    "duplicate_chat_count": self.duplicate_chat_count,
+                    "duplicate_window_seconds": self.duplicate_window,
+                    "message_file": str(self.message_path),
                     "last_system_status": self.system_status,
                     "last_error": self.last_error,
                 },
