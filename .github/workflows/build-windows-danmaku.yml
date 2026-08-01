@@ -1,4 +1,4 @@
-name: Build Windows Danmaku Edition
+name: Build Windows Multi-platform Danmaku Edition
 
 on:
   workflow_dispatch:
@@ -30,6 +30,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
+      - name: Apply Douyu integration
+        shell: pwsh
+        run: |
+          python tools/apply_douyu_integration.py
+          Select-String -Path main.py -Pattern "DouyuDanmakuSession"
+          Select-String -Path config/config.ini -Pattern "是否开启斗鱼弹幕分析"
+
       - name: Download verified Douyin danmaku relay
         shell: pwsh
         run: |
@@ -47,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           python -m unittest discover -s tests -v
-          python -m py_compile main.py src/danmaku.py
+          python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py tools/apply_douyu_integration.py
 
       - name: Build application
         shell: pwsh
@@ -69,15 +76,23 @@ jobs:
           Copy-Item $ffmpegExe.FullName dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe -Force
           & dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe -version
 
+      - name: Verify packaged files
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/DouyinLiveRecorder/DouyinLiveRecorder.exe)) { throw "Application executable missing" }
+          if (-not (Test-Path dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe)) { throw "FFmpeg missing" }
+          if (-not (Test-Path dist/DouyinLiveRecorder/vendor/douyinlive/douyinLive.exe)) { throw "Douyin relay missing" }
+          if (-not (Select-String -Path dist/DouyinLiveRecorder/config/config.ini -Pattern "是否开启斗鱼弹幕分析" -Quiet)) { throw "Douyu config missing" }
+
       - name: Create ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath DouyinLiveRecorder-Danmaku-Windows-x64.zip -CompressionLevel Optimal
+          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64.zip -CompressionLevel Optimal
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinLiveRecorder-Danmaku-Windows-x64
-          path: DouyinLiveRecorder-Danmaku-Windows-x64.zip
+          name: LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64
+          path: LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
