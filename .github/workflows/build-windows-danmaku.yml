@@ -1,0 +1,73 @@
+name: Build Windows Danmaku Edition
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/danmaku-highlights
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Download verified Douyin danmaku relay
+        shell: pwsh
+        run: |
+          $asset = "https://github.com/jwwsjlm/douyinLive/releases/download/v2.0.24/douyinLive-v2.0.24-79453ece4a44-windows-amd64.zip"
+          $expected = "cc1cc9df433337c62263d7925da77ab17622603bbb554f1c27d3cbe9048cce4f"
+          Invoke-WebRequest -Uri $asset -OutFile douyinLive.zip
+          $actual = (Get-FileHash douyinLive.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "douyinLive checksum mismatch: $actual" }
+          Expand-Archive douyinLive.zip -DestinationPath relay -Force
+          New-Item -ItemType Directory -Force vendor/douyinlive | Out-Null
+          Copy-Item relay/douyinLive.exe vendor/douyinlive/douyinLive.exe
+          Copy-Item relay/LICENSE vendor/douyinlive/LICENSE
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          python -m py_compile main.py src/danmaku.py
+
+      - name: Build application
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --console --name DouyinLiveRecorder --add-data "src/javascript;src/javascript" main.py
+          Copy-Item config dist/DouyinLiveRecorder/config -Recurse -Force
+          Copy-Item i18n dist/DouyinLiveRecorder/i18n -Recurse -Force
+          Copy-Item vendor dist/DouyinLiveRecorder/vendor -Recurse -Force
+          Copy-Item README.md,LICENSE dist/DouyinLiveRecorder/ -Force
+          Copy-Item docs dist/DouyinLiveRecorder/docs -Recurse -Force
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath DouyinLiveRecorder-Danmaku-Windows-x64.zip -CompressionLevel Optimal
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder-Danmaku-Windows-x64
+          path: DouyinLiveRecorder-Danmaku-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

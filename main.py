@@ -31,6 +31,7 @@ from src import spider, stream
 from src.proxy import ProxyDetector
 from src.utils import logger
 from src import utils
+from src.danmaku import DanmakuSession
 from msg_push import (
     dingtalk, xizhi, tg_bot, send_email, bark, ntfy, pushplus
 )
@@ -65,6 +66,7 @@ not_record_list = []
 start_display_time = datetime.datetime.now()
 global_proxy = False
 recording_time_list = {}
+douyin_room_ids = {}
 script_path = os.path.split(os.path.realpath(sys.argv[0]))[0]
 config_file = f'{script_path}/config/config.ini'
 url_config_file = f'{script_path}/config/URL_config.ini'
@@ -424,6 +426,21 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
         ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
     )
 
+    danmaku_session = None
+    if enable_douyin_danmaku and "douyin.com/" in record_url:
+        try:
+            danmaku_session = DanmakuSession(
+                save_file_path, douyin_room_ids.get(record_url, record_url), dy_cookie, danmaku_collector_command,
+                highlight_options=danmaku_highlight_options,
+                relay_executable=danmaku_relay_executable,
+                relay_port=danmaku_relay_port,
+            )
+            danmaku_session.start()
+            logger.info(f"[{record_name}] 抖音弹幕分析已启动")
+        except Exception as e:
+            danmaku_session = None
+            logger.error(f"[{record_name}] 抖音弹幕分析启动失败: {e}")
+
     subs_file_path = save_file_path.rsplit('.', maxsplit=1)[0]
     subs_thread_name = f'subs_{Path(subs_file_path).name}'
     if create_time_file and not split_video_by_time and '音频' not in save_type:
@@ -445,10 +462,16 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
             else:
                 process.send_signal(signal.SIGINT)
             process.wait()
+            if danmaku_session:
+                csv_path, highlight_path = danmaku_session.stop()
+                logger.info(f"弹幕统计已保存: {csv_path}; 热点区间已保存: {highlight_path}")
             return True
         time.sleep(1)
 
     return_code = process.returncode
+    if danmaku_session:
+        csv_path, highlight_path = danmaku_session.stop()
+        logger.info(f"弹幕统计已保存: {csv_path}; 热点区间已保存: {highlight_path}")
     stop_time = time.strftime('%Y-%m-%d %H:%M:%S')
     if return_code == 0:
         if converts_to_mp4 and save_type == 'TS':
@@ -590,6 +613,15 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     url=record_url,
                                     proxy_addr=proxy_address,
                                     cookies=dy_cookie))
+                            room_data = json_data if isinstance(json_data, dict) else {}
+                            owner_data = room_data.get('owner')
+                            owner_data = owner_data if isinstance(owner_data, dict) else {}
+                            room_identifier = (
+                                owner_data.get('web_rid') or room_data.get('web_rid') or
+                                room_data.get('id_str') or room_data.get('id')
+                            )
+                            if room_identifier:
+                                douyin_room_ids[record_url] = str(room_identifier)
                             port_info = asyncio.run(
                                 stream.get_douyin_stream_url(json_data, record_quality, proxy_address))
 
@@ -1833,6 +1865,24 @@ while True:
     enable_proxy_platform_list = enable_proxy_platform.replace('，', ',').split(',') if enable_proxy_platform else None
     extra_enable_proxy = read_config_value(config, '录制设置', '额外使用代理录制的平台(逗号分隔)', '')
     extra_enable_proxy_platform_list = extra_enable_proxy.replace('，', ',').split(',') if extra_enable_proxy else None
+    enable_douyin_danmaku = options.get(
+        read_config_value(config, '弹幕分析', '是否开启抖音弹幕分析(是/否)', "否"), False
+    )
+    danmaku_collector_command = read_config_value(config, '弹幕分析', '弹幕采集命令', "")
+    danmaku_relay_executable = read_config_value(
+        config, '弹幕分析', '内置弹幕组件路径',
+        f'{script_path}/vendor/douyinlive/douyinLive.exe'
+    ) or f'{script_path}/vendor/douyinlive/douyinLive.exe'
+    danmaku_relay_port = int(read_config_value(config, '弹幕分析', '内置弹幕组件端口', 1088))
+    danmaku_highlight_options = {
+        'window': int(read_config_value(config, '弹幕分析', '热点统计窗口(秒)', 10)),
+        'baseline_window': int(read_config_value(config, '弹幕分析', '热点基线窗口(秒)', 60)),
+        'multiplier': float(read_config_value(config, '弹幕分析', '热点倍数', 2.5)),
+        'min_comments': int(read_config_value(config, '弹幕分析', '热点最低每秒弹幕数', 5)),
+        'pre_roll': int(read_config_value(config, '弹幕分析', '热点前置时间(秒)', 15)),
+        'post_roll': int(read_config_value(config, '弹幕分析', '热点后置时间(秒)', 25)),
+        'merge_gap': int(read_config_value(config, '弹幕分析', '热点合并间隔(秒)', 10)),
+    }
     live_status_push = read_config_value(config, '推送配置', '直播状态推送渠道', "")
     dingtalk_api_url = read_config_value(config, '推送配置', '钉钉推送接口链接', "")
     xizhi_api_url = read_config_value(config, '推送配置', '微信推送接口链接', "")
