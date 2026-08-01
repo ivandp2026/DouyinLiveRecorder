@@ -613,15 +613,19 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     url=record_url,
                                     proxy_addr=proxy_address,
                                     cookies=dy_cookie))
-                            room_data = json_data if isinstance(json_data, dict) else {}
-                            owner_data = room_data.get('owner')
-                            owner_data = owner_data if isinstance(owner_data, dict) else {}
-                            room_identifier = (
-                                owner_data.get('web_rid') or room_data.get('web_rid') or
-                                room_data.get('id_str') or room_data.get('id')
-                            )
-                            if room_identifier:
-                                douyin_room_ids[record_url] = str(room_identifier)
+                            # The relay expects the public identifier after live.douyin.com/.
+                            # Keep it for normal PC links; derive one only for share links.
+                            if 'live.douyin.com/' not in record_url:
+                                room_data = json_data if isinstance(json_data, dict) else {}
+                                owner_data = room_data.get('owner')
+                                owner_data = owner_data if isinstance(owner_data, dict) else {}
+                                room_identifier = (
+                                    owner_data.get('web_rid') or owner_data.get('display_id') or
+                                    owner_data.get('unique_id') or room_data.get('web_rid') or
+                                    room_data.get('id_str') or room_data.get('id')
+                                )
+                                if room_identifier:
+                                    douyin_room_ids[record_url] = str(room_identifier)
                             port_info = asyncio.run(
                                 stream.get_douyin_stream_url(json_data, record_quality, proxy_address))
 

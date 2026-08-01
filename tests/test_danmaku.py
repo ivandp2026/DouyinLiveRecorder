@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import tempfile
+import json
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,9 @@ class DanmakuTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertTrue(first[0].is_file())
             self.assertTrue(first[1].is_file())
+            payload = json.loads(first[1].read_text(encoding="utf-8"))
+            self.assertIn("collector", payload)
+            self.assertEqual(payload["collector"]["raw_event_count"], 0)
 
 
 if __name__ == "__main__":

@@ -159,6 +159,10 @@ class DanmakuSession:
         self.users: dict[int, set[str]] = {}
         self.process: subprocess.Popen | None = None
         self.websocket = None
+        self.connected = False
+        self.raw_event_count = 0
+        self.system_status: dict = {}
+        self.last_error = ""
         self.reader_thread: threading.Thread | None = None
         self.writer_thread: threading.Thread | None = None
         self._stop_lock = threading.Lock()
@@ -209,6 +213,7 @@ class DanmakuSession:
                 self.websocket = websocket.create_connection(
                     self._relay_url(), timeout=10, enable_multithread=True,
                 )
+                self.connected = True
                 self.websocket.settimeout(1)
                 last_ping = time.monotonic()
                 while not self.stop_event.is_set():
@@ -222,10 +227,15 @@ class DanmakuSession:
                     if not message or message == "pong":
                         continue
                     event = json.loads(message)
-                    if isinstance(event, dict) and event.get("type") != "system":
-                        second = max(0, int(time.monotonic() - self.started_at))
-                        self.events.put((second, event))
-            except Exception:
+                    if isinstance(event, dict):
+                        if event.get("type") == "system":
+                            self.system_status = event
+                        else:
+                            self.raw_event_count += 1
+                            second = max(0, int(time.monotonic() - self.started_at))
+                            self.events.put((second, event))
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
                 if not self.stop_event.wait(2):
                     continue
             finally:
@@ -311,6 +321,12 @@ class DanmakuSession:
             payload = {
                 "video": str(self.prefix),
                 "duration_seconds": len(self.rows),
+                "collector": {
+                    "connected": self.connected,
+                    "raw_event_count": self.raw_event_count,
+                    "last_system_status": self.system_status,
+                    "last_error": self.last_error,
+                },
                 "highlights": detect_highlights(self.rows, **self.highlight_options),
             }
             json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
