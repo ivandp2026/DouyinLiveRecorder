@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -62,6 +63,17 @@ class DanmakuTests(unittest.TestCase):
         })
         self.assertEqual(session.rows[0].comment_count, 2)
         self.assertEqual(session.rows[0].unique_users, 1)
+
+    def test_stop_writes_sidecars_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = str(Path(directory) / "record.ts")
+            session = DanmakuSession(video, "https://live.douyin.com/123", "")
+            session._consume(0, {"method": "WebcastChatMessage", "user": {"id": "1"}})
+            first = session.stop()
+            second = session.stop()
+            self.assertEqual(first, second)
+            self.assertTrue(first[0].is_file())
+            self.assertTrue(first[1].is_file())
 
 
 if __name__ == "__main__":

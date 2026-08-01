@@ -32,6 +32,8 @@ LIKE_TYPES = {"like", "WebcastLikeMessage"}
 
 _relay_lock = threading.Lock()
 _relay_process: subprocess.Popen | None = None
+_sessions_lock = threading.Lock()
+_active_sessions: set["DanmakuSession"] = set()
 
 
 def _port_is_open(port: int) -> bool:
@@ -159,6 +161,8 @@ class DanmakuSession:
         self.websocket = None
         self.reader_thread: threading.Thread | None = None
         self.writer_thread: threading.Thread | None = None
+        self._stop_lock = threading.Lock()
+        self._stop_result: tuple[Path, Path] | None = None
 
     def start(self) -> None:
         if not self.command:
@@ -167,6 +171,8 @@ class DanmakuSession:
             self.writer_thread = threading.Thread(target=self._aggregate, daemon=True)
             self.reader_thread.start()
             self.writer_thread.start()
+            with _sessions_lock:
+                _active_sessions.add(self)
             return
         args = shlex.split(self.command, posix=os.name != "nt")
         if not args:
@@ -182,6 +188,8 @@ class DanmakuSession:
         self.writer_thread = threading.Thread(target=self._aggregate, daemon=True)
         self.reader_thread.start()
         self.writer_thread.start()
+        with _sessions_lock:
+            _active_sessions.add(self)
 
     def _relay_url(self) -> str:
         room_id = urlparse(self.room_url).path.strip("/").split("/")[-1]
@@ -273,34 +281,54 @@ class DanmakuSession:
                 self._ensure_row(elapsed)
 
     def stop(self) -> tuple[Path, Path]:
-        self.stop_event.set()
-        if self.websocket:
-            try:
-                self.websocket.close()
-            except Exception:
-                pass
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-        if self.reader_thread:
-            self.reader_thread.join(timeout=2)
-        if self.writer_thread:
-            self.writer_thread.join(timeout=2)
-        self._ensure_row(max(0, int(time.monotonic() - self.started_at)))
-        csv_path = self.prefix.with_suffix(".danmaku.csv")
-        json_path = self.prefix.with_suffix(".highlights.json")
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=list(asdict(SecondStats(0)).keys()))
-            writer.writeheader()
-            writer.writerows(asdict(row) for row in self.rows)
-        payload = {
-            "video": str(self.prefix),
-            "duration_seconds": len(self.rows),
-            "highlights": detect_highlights(self.rows, **self.highlight_options),
-        }
-        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return csv_path, json_path
+        with self._stop_lock:
+            if self._stop_result:
+                return self._stop_result
+            self.stop_event.set()
+            if self.websocket:
+                try:
+                    self.websocket.close()
+                except Exception:
+                    pass
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+            if self.reader_thread:
+                self.reader_thread.join(timeout=2)
+            if self.writer_thread:
+                self.writer_thread.join(timeout=2)
+            self._ensure_row(max(0, int(time.monotonic() - self.started_at)))
+            csv_path = self.prefix.with_suffix(".danmaku.csv")
+            json_path = self.prefix.with_suffix(".highlights.json")
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=list(asdict(SecondStats(0)).keys()))
+                writer.writeheader()
+                writer.writerows(asdict(row) for row in self.rows)
+            payload = {
+                "video": str(self.prefix),
+                "duration_seconds": len(self.rows),
+                "highlights": detect_highlights(self.rows, **self.highlight_options),
+            }
+            json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._stop_result = (csv_path, json_path)
+            with _sessions_lock:
+                _active_sessions.discard(self)
+            return self._stop_result
+
+
+def _finalize_active_sessions() -> None:
+    """Flush sidecars when the recorder exits before FFmpeg's normal callback."""
+    with _sessions_lock:
+        sessions = list(_active_sessions)
+    for session in sessions:
+        try:
+            session.stop()
+        except Exception:
+            pass
+
+
+atexit.register(_finalize_active_sessions)
