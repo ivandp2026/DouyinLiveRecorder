@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -28,14 +28,18 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r requirements.txt pyinstaller streamlink
+          python -c "import streamlink; print('Streamlink', streamlink.__version__)"
 
-      - name: Apply Douyu integration
+      - name: Apply Douyu integrations
         shell: pwsh
         run: |
           python tools/apply_douyu_integration.py
+          python tools/apply_douyu_streamlink.py
           Select-String -Path main.py -Pattern "DouyuDanmakuSession"
+          Select-String -Path main.py -Pattern "resolve_douyu_stream"
           Select-String -Path config/config.ini -Pattern "是否开启斗鱼弹幕分析"
+          if (Select-String -Path main.py -Pattern "get_douyu_info_data" -Quiet) { throw "Old Douyu video resolver is still routed from main.py" }
 
       - name: Download verified Douyin danmaku relay
         shell: pwsh
@@ -54,12 +58,13 @@ jobs:
         shell: pwsh
         run: |
           python -m unittest discover -s tests -v
-          python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py tools/apply_douyu_integration.py
+          python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py src/douyu_streamlink.py tools/apply_douyu_integration.py tools/apply_douyu_streamlink.py
+          python -c "from src.douyu_streamlink import normalize_douyu_url; assert normalize_douyu_url('https://www.douyu.com/5135383?dyshid=abc') == 'https://www.douyu.com/5135383'"
 
       - name: Build application
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --console --name DouyinLiveRecorder --add-data "src/javascript;src/javascript" main.py
+          pyinstaller --noconfirm --clean --onedir --console --name DouyinLiveRecorder --collect-all streamlink --collect-all lxml --add-data "src/javascript;src/javascript" main.py
           Copy-Item config dist/DouyinLiveRecorder/config -Recurse -Force
           Copy-Item i18n dist/DouyinLiveRecorder/i18n -Recurse -Force
           Copy-Item vendor dist/DouyinLiveRecorder/vendor -Recurse -Force
@@ -83,16 +88,18 @@ jobs:
           if (-not (Test-Path dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe)) { throw "FFmpeg missing" }
           if (-not (Test-Path dist/DouyinLiveRecorder/vendor/douyinlive/douyinLive.exe)) { throw "Douyin relay missing" }
           if (-not (Select-String -Path dist/DouyinLiveRecorder/config/config.ini -Pattern "是否开启斗鱼弹幕分析" -Quiet)) { throw "Douyu config missing" }
+          $env:PYTHONPATH = "dist/DouyinLiveRecorder/_internal"
+          & dist/DouyinLiveRecorder/DouyinLiveRecorder.exe --help 2>&1 | Select-Object -First 20
 
       - name: Create ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64.zip -CompressionLevel Optimal
+          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64.zip -CompressionLevel Optimal
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64
-          path: LiveRecorder-Douyin-Douyu-Danmaku-Windows-x64.zip
+          name: LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64
+          path: LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
