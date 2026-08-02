@@ -47,14 +47,19 @@ def resolve_room_id(room_url: str, timeout: int = 10) -> str:
         return slug
     response = requests.get(
         room_url,
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36"
+            )
+        },
         timeout=timeout,
     )
     response.raise_for_status()
     patterns = (
         r'"room_id"\s*:\s*"?(\d+)"?',
-        r'\$ROOM\.room_id\s*=\s*(\d+)',
-        r'roomId\s*[:=]\s*["\']?(\d+)',
+        r"\$ROOM\.room_id\s*=\s*(\d+)",
+        r"roomId\s*[:=]\s*[\"']?(\d+)",
     )
     for pattern in patterns:
         match = re.search(pattern, response.text)
@@ -64,12 +69,13 @@ def resolve_room_id(room_url: str, timeout: int = 10) -> str:
 
 
 class DouyuDanmakuSession(DanmakuSession):
-    """Collect Douyu chat and feed the shared deduplication/highlight engine."""
+    """Collect Douyu chat and feed the shared raw-data/heat engine."""
 
     def start(self) -> None:
-        self.message_path.parent.mkdir(parents=True, exist_ok=True)
-        self.message_file = self.message_path.open("w", encoding="utf-8-sig", buffering=1)
-        self.reader_thread = threading.Thread(target=self._read_douyu_events, daemon=True)
+        self._open_outputs()
+        self.reader_thread = threading.Thread(
+            target=self._read_douyu_events, daemon=True
+        )
         self.writer_thread = threading.Thread(target=self._aggregate, daemon=True)
         self.reader_thread.start()
         self.writer_thread.start()
@@ -91,12 +97,19 @@ class DouyuDanmakuSession(DanmakuSession):
             sock: socket.socket | None = None
             try:
                 room_id = resolve_room_id(self.room_url)
-                sock = socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=10)
+                sock = socket.create_connection(
+                    (SERVER_HOST, SERVER_PORT), timeout=10
+                )
                 sock.settimeout(1)
                 self._send(sock, f"type@=loginreq/roomid@={_escape(room_id)}/")
-                self._send(sock, f"type@=joingroup/rid@={_escape(room_id)}/gid@=-9999/")
+                self._send(
+                    sock,
+                    f"type@=joingroup/rid@={_escape(room_id)}/gid@=-9999/",
+                )
                 self.connected = True
-                heartbeat = threading.Thread(target=self._heartbeat, args=(sock,), daemon=True)
+                heartbeat = threading.Thread(
+                    target=self._heartbeat, args=(sock,), daemon=True
+                )
                 heartbeat.start()
                 buffer = bytearray()
                 while not self.stop_event.is_set():
@@ -115,22 +128,65 @@ class DouyuDanmakuSession(DanmakuSession):
                             continue
                         if len(buffer) < total_length:
                             break
-                        payload = bytes(buffer[12:total_length]).rstrip(b"\x00").decode("utf-8", "replace")
+                        payload = (
+                            bytes(buffer[12:total_length])
+                            .rstrip(b"\x00")
+                            .decode("utf-8", "replace")
+                        )
                         del buffer[:total_length]
                         message = parse_stt(payload)
                         message_type = message.get("type", "")
+                        second = max(
+                            0, int(time.monotonic() - self.started_at)
+                        )
                         if message_type == "chatmsg":
                             self.raw_event_count += 1
-                            second = max(0, int(time.monotonic() - self.started_at))
-                            self.events.put((second, {
-                                "type": "chat",
-                                "content": message.get("txt", ""),
-                                "user_id": message.get("uid") or message.get("nn"),
-                            }))
+                            self.events.put(
+                                (
+                                    second,
+                                    {
+                                        "type": "chat",
+                                        "content": message.get("txt", ""),
+                                        "user_id": message.get("uid", ""),
+                                        "nickname": message.get("nn", ""),
+                                        "level": message.get("level", ""),
+                                        "badge_name": message.get("bnn", ""),
+                                        "badge_level": message.get("bl", ""),
+                                        "color": message.get("col", ""),
+                                        "douyu_message": message,
+                                    },
+                                )
+                            )
                         elif message_type in {"dgb", "spbc"}:
-                            second = max(0, int(time.monotonic() - self.started_at))
-                            self.events.put((second, {"type": "gift", "count": message.get("gfcnt", 1)}))
+                            self.raw_event_count += 1
+                            self.events.put(
+                                (
+                                    second,
+                                    {
+                                        "type": "gift",
+                                        "count": message.get("gfcnt", 1),
+                                        "gift_id": message.get("gfid", ""),
+                                        "user_id": message.get("uid", ""),
+                                        "nickname": message.get("nn", ""),
+                                        "douyu_message": message,
+                                    },
+                                )
+                            )
+                        elif message_type in {"uenter", "rss"}:
+                            self.raw_event_count += 1
+                            self.events.put(
+                                (
+                                    second,
+                                    {
+                                        "type": "system",
+                                        "user_id": message.get("uid", ""),
+                                        "nickname": message.get("nn", ""),
+                                        "douyu_message": message,
+                                    },
+                                )
+                            )
             except Exception as exc:
+                self.connected = False
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if self.stop_event.wait(3):
                     break
