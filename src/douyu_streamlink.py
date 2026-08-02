@@ -29,11 +29,14 @@ def resolve_douyu_stream(url: str, quality: str = "OD", cookies: str = "", proxy
     session = Streamlink()
     if proxy:
         session.set_option("http-proxy", proxy)
-        session.set_option("https-proxy", proxy)
     if cookies:
         session.set_option("http-headers", {"Cookie": cookies})
 
-    plugin = session.resolve_url(normalized)
+    # Streamlink 8.x returns (plugin_name, plugin_class, resolved_url), not a
+    # plugin instance. Instantiate the plugin explicitly so metadata and
+    # streams come from the same resolved URL.
+    _plugin_name, plugin_class, resolved_url = session.resolve_url(normalized)
+    plugin = plugin_class(session, resolved_url, None)
     streams = plugin.streams()
     if not streams:
         return {
