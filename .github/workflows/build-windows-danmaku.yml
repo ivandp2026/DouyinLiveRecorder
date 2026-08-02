@@ -27,6 +27,7 @@ jobs:
       - name: Install build dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller streamlink
           python -c "import streamlink; print('Streamlink', streamlink.__version__)"
@@ -34,6 +35,7 @@ jobs:
       - name: Apply Douyu integrations
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           python tools/apply_douyu_integration.py
           python tools/apply_douyu_streamlink.py
           Select-String -Path main.py -Pattern "DouyuDanmakuSession"
@@ -44,6 +46,7 @@ jobs:
       - name: Download verified Douyin danmaku relay
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $asset = "https://github.com/jwwsjlm/douyinLive/releases/download/v2.0.24/douyinLive-v2.0.24-79453ece4a44-windows-amd64.zip"
           $expected = "cc1cc9df433337c62263d7925da77ab17622603bbb554f1c27d3cbe9048cce4f"
           Invoke-WebRequest -Uri $asset -OutFile douyinLive.zip
@@ -57,6 +60,7 @@ jobs:
       - name: Run tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           python -m unittest discover -s tests -v
           python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py src/douyu_streamlink.py tools/apply_douyu_integration.py tools/apply_douyu_streamlink.py
           python -c "from src.douyu_streamlink import normalize_douyu_url; assert normalize_douyu_url('https://www.douyu.com/5135383?dyshid=abc') == 'https://www.douyu.com/5135383'"
@@ -64,6 +68,7 @@ jobs:
       - name: Build application
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           pyinstaller --noconfirm --clean --onedir --console --name DouyinLiveRecorder --collect-all streamlink --collect-all lxml --add-data "src/javascript;src/javascript" main.py
           Copy-Item config dist/DouyinLiveRecorder/config -Recurse -Force
           Copy-Item i18n dist/DouyinLiveRecorder/i18n -Recurse -Force
@@ -74,6 +79,7 @@ jobs:
       - name: Bundle FFmpeg
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           choco install ffmpeg -y --no-progress
           $ffmpegExe = Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg\tools" -Filter ffmpeg.exe -Recurse | Select-Object -First 1
           if (-not $ffmpegExe) { throw "Could not locate the installed ffmpeg.exe" }
@@ -84,16 +90,21 @@ jobs:
       - name: Verify packaged files
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           if (-not (Test-Path dist/DouyinLiveRecorder/DouyinLiveRecorder.exe)) { throw "Application executable missing" }
           if (-not (Test-Path dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe)) { throw "FFmpeg missing" }
           if (-not (Test-Path dist/DouyinLiveRecorder/vendor/douyinlive/douyinLive.exe)) { throw "Douyin relay missing" }
           if (-not (Select-String -Path dist/DouyinLiveRecorder/config/config.ini -Pattern "是否开启斗鱼弹幕分析" -Quiet)) { throw "Douyu config missing" }
-          $env:PYTHONPATH = "dist/DouyinLiveRecorder/_internal"
-          & dist/DouyinLiveRecorder/DouyinLiveRecorder.exe --help 2>&1 | Select-Object -First 20
+          $douyuPlugin = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse -Filter douyu.py | Where-Object { $_.FullName -match "streamlink.*plugins" } | Select-Object -First 1
+          if (-not $douyuPlugin) { throw "Packaged Streamlink Douyu plugin missing" }
+          $streamlinkPackage = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse | Where-Object { $_.FullName -match "streamlink" } | Select-Object -First 1
+          if (-not $streamlinkPackage) { throw "Packaged Streamlink files missing" }
+          Write-Host "Verified packaged Streamlink Douyu plugin: $($douyuPlugin.FullName)"
 
       - name: Create ZIP
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64.zip -CompressionLevel Optimal
 
       - name: Upload Windows package
