@@ -413,6 +413,25 @@ def _segment_events(
     return selected
 
 
+def _segment_rows(
+    rows: Iterable[SecondStats], start: float, duration: float
+) -> list[SecondStats]:
+    """Select timeline rows for one video segment and reset its clock to zero."""
+    end = start + max(0.0, duration)
+    selected = []
+    for row in rows:
+        if start <= row.second < end:
+            values = asdict(row)
+            values["second"] = max(0, int(row.second - start))
+            selected.append(SecondStats(**values))
+    return selected
+
+
+def _segment_bundle_dir(prefix: Path, source: Path) -> Path:
+    """Keep one recording piece and all of its sidecars in one folder."""
+    return prefix.parent / f"{prefix.name}.segments" / source.stem
+
+
 def _segment_output_path(source: Path) -> Path:
     return source.with_name(f"{source.stem}.danmaku.mp4")
 
@@ -799,6 +818,7 @@ class DanmakuSession:
         self.reader_thread: threading.Thread | None = None
         self.writer_thread: threading.Thread | None = None
         self.render_thread: threading.Thread | None = None
+        self.organized_sources: list[Path] = []
         self._stop_lock = threading.Lock()
         self._stop_result: tuple[Path, Path] | None = None
 
@@ -1033,6 +1053,240 @@ class DanmakuSession:
             )
         return items
 
+    @staticmethod
+    def _keyword_payload_for_records(records: Iterable[dict]) -> list[dict]:
+        counts: Counter[str] = Counter()
+        seconds_by_word: dict[str, Counter[int]] = defaultdict(Counter)
+        for record in records:
+            if record.get("type") not in CHAT_TYPES:
+                continue
+            try:
+                second = max(0, int(float(record.get("second", 0))))
+            except (TypeError, ValueError):
+                second = 0
+            for token in _keyword_tokens(str(record.get("text") or "")):
+                counts[token] += 1
+                seconds_by_word[token][second] += 1
+        items = []
+        for word, count in counts.most_common(100):
+            seconds = seconds_by_word[word]
+            peak_second = max(seconds, key=seconds.get) if seconds else 0
+            first_second = min(seconds) if seconds else 0
+            items.append({
+                "word": word,
+                "count": count,
+                "first_second": first_second,
+                "first_time": _clock(first_second),
+                "peak_second": peak_second,
+                "peak_time": _clock(peak_second),
+                "peak_count": seconds.get(peak_second, 0),
+            })
+        return items
+
+    def _write_segment_bundle(
+        self,
+        source: Path,
+        records: list[dict],
+        rows: list[SecondStats],
+        index: int,
+        global_start: float,
+        duration: float,
+    ) -> tuple[dict, dict, Path, Path]:
+        """Write the complete, independent data set for one recording piece."""
+        bundle_dir = _segment_bundle_dir(self.prefix, source)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        organized_source = bundle_dir / source.name
+        if source.resolve() != organized_source.resolve():
+            shutil.move(str(source), str(organized_source))
+        self.organized_sources.append(organized_source)
+
+        stem = organized_source.stem
+        raw_path = bundle_dir / f"{stem}.danmaku.raw.jsonl"
+        message_path = bundle_dir / f"{stem}.danmaku.txt"
+        legacy_csv_path = bundle_dir / f"{stem}.danmaku.csv"
+        timeline_path = bundle_dir / f"{stem}.danmaku.timeline.csv"
+        keywords_path = bundle_dir / f"{stem}.danmaku.keywords.json"
+        highlight_path = bundle_dir / f"{stem}.highlights.json"
+        report_path = bundle_dir / f"{stem}.danmaku.report.html"
+        ass_path = bundle_dir / f"{stem}.danmaku.ass"
+        danmaku_video_path = bundle_dir / f"{stem}.danmaku.mp4"
+        render_status_path = bundle_dir / f"{stem}.danmaku.render.json"
+
+        raw_path.write_text(
+            "".join(json.dumps(record, ensure_ascii=False, default=str) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        message_path.write_text(
+            "".join(
+                f"[{_clock(float(record.get('second', 0)))}] {record.get('text', '')}\n"
+                for record in records
+                if record.get("type") in CHAT_TYPES and record.get("text")
+            ),
+            encoding="utf-8-sig",
+        )
+        fieldnames = list(asdict(SecondStats(0)).keys())
+        for csv_path in (legacy_csv_path, timeline_path):
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(asdict(row) for row in rows)
+
+        keywords = self._keyword_payload_for_records(records)
+        keywords_path.write_text(
+            json.dumps(keywords, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        highlights = summarize_highlights(
+            records, detect_highlights(rows, **self.highlight_options)
+        )
+        _, displayed_count = build_ass(records, ass_path)
+        total_raw = sum(row.raw_comment_count for row in rows)
+        total_duplicate = sum(row.duplicate_count for row in rows)
+        users = {
+            str(record.get("user_id") or record.get("user") or "")
+            for record in records
+            if record.get("user_id") or record.get("user")
+        }
+        summary = {
+            "title": f"{self.platform.upper()} 第 {index + 1} 段弹幕热度报告",
+            "platform": self.platform,
+            "room_url": self.room_url,
+            "segment_index": index,
+            "global_start_second": round(global_start, 3),
+            "duration_seconds": round(duration, 3),
+            "duration_text": _clock(duration),
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "raw_event_count": len(records),
+            "raw_comment_count": total_raw,
+            "filtered_comment_count": sum(row.comment_count for row in rows),
+            "duplicate_comment_count": total_duplicate,
+            "repeat_ratio": round(total_duplicate / total_raw, 4) if total_raw else 0.0,
+            "unique_users": len(users),
+            "gift_count": sum(row.gift_count for row in rows),
+            "like_count": sum(row.like_count for row in rows),
+            "displayed_danmaku_count": displayed_count,
+            "collector_connected": self.connected,
+            "collector_last_error": self.last_error,
+        }
+        files = {
+            "original_video": str(organized_source),
+            "danmaku_video": str(danmaku_video_path),
+            "raw_jsonl": str(raw_path),
+            "message_text": str(message_path),
+            "timeline_csv": str(timeline_path),
+            "legacy_csv": str(legacy_csv_path),
+            "keywords_json": str(keywords_path),
+            "highlights_json": str(highlight_path),
+            "report_html": str(report_path),
+            "ass": str(ass_path),
+            "render_status": str(render_status_path),
+        }
+        payload = {
+            "video": str(organized_source),
+            "summary": summary,
+            "collector": {
+                "connected": self.connected,
+                "last_system_status": self.system_status,
+                "last_error": self.last_error,
+            },
+            "timeline": [asdict(row) for row in rows],
+            "keywords": keywords,
+            "highlights": highlights,
+            "files": files,
+            "render": {"state": "pending"},
+        }
+        highlight_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _write_report(report_path, payload)
+        render_status_path.write_text(
+            json.dumps({"state": "pending", "output": str(danmaku_video_path)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        render_job = {
+            "source": organized_source,
+            "ass": ass_path,
+            "output": danmaku_video_path,
+            "status": render_status_path,
+            "report": report_path,
+        }
+        manifest_item = {
+            "index": index,
+            "global_start_second": round(global_start, 3),
+            "duration_seconds": round(duration, 3),
+            "folder": str(bundle_dir),
+            "files": files,
+        }
+        return render_job, manifest_item, timeline_path, highlight_path
+
+    def _stop_segmented(self, raw_records: list[dict]) -> tuple[Path, Path] | None:
+        sources = _video_candidates(self.video_path)
+        if not sources or not re.search(r"%0\d+d", self.video_path.name):
+            return None
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            return None
+        source_durations = [(source, _probe_duration(ffmpeg, source)) for source in sources]
+        if any(not duration or duration <= 0 for _, duration in source_durations):
+            return None
+        offset = 0.0
+        jobs = []
+        manifest_items = []
+        result_paths = None
+        for index, (source, duration) in enumerate(source_durations):
+            assert duration is not None
+            records = _segment_events(raw_records, offset, duration)
+            rows = _segment_rows(self.rows, offset, duration)
+            job, manifest_item, timeline_path, highlight_path = self._write_segment_bundle(
+                source, records, rows, index, offset, duration
+            )
+            jobs.append(job)
+            manifest_items.append(manifest_item)
+            result_paths = result_paths or (timeline_path, highlight_path)
+            offset += duration
+
+        root = self.prefix.parent / f"{self.prefix.name}.segments"
+        manifest_path = root / "segments.json"
+        manifest_path.write_text(
+            json.dumps({
+                "source_pattern": str(self.video_path),
+                "total_segments": len(manifest_items),
+                "total_duration_seconds": round(offset, 3),
+                "segments": manifest_items,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.message_path.unlink(missing_ok=True)
+        self.raw_path.unlink(missing_ok=True)
+
+        def worker() -> None:
+            for job, manifest_item in zip(jobs, manifest_items):
+                status = render_danmaku_video(
+                    job["source"], job["ass"], job["output"], status_path=job["status"]
+                )
+                manifest_item["render"] = status
+                payload = json.loads(Path(manifest_item["files"]["highlights_json"]).read_text(encoding="utf-8"))
+                payload["render"] = status
+                _write_report(job["report"], payload)
+                manifest_path.write_text(
+                    json.dumps({
+                        "source_pattern": str(self.video_path),
+                        "total_segments": len(manifest_items),
+                        "total_duration_seconds": round(offset, 3),
+                        "segments": manifest_items,
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+        self.render_thread = threading.Thread(
+            target=worker, name=f"danmaku_render_{self.prefix.name}", daemon=False
+        )
+        self.render_thread.start()
+        return result_paths
+
+    def wait_for_render(self) -> None:
+        if self.render_thread:
+            self.render_thread.join()
+
     def _start_render(self, report_payload: dict, report_path: Path) -> None:
         ass_path = Path(report_payload["files"]["ass"])
         output_path = Path(report_payload["files"]["danmaku_video"])
@@ -1104,6 +1358,14 @@ class DanmakuSession:
             self._ensure_row(max(0, int(time.monotonic() - self.started_at)))
             _compute_heat(self.rows)
 
+            raw_records = self._read_raw_records()
+            segmented_result = self._stop_segmented(raw_records)
+            if segmented_result:
+                self._stop_result = segmented_result
+                with _sessions_lock:
+                    _active_sessions.discard(self)
+                return self._stop_result
+
             legacy_csv_path = self.prefix.with_suffix(".danmaku.csv")
             timeline_path = self.prefix.with_suffix(".danmaku.timeline.csv")
             highlight_path = self.prefix.with_suffix(".highlights.json")
@@ -1128,7 +1390,6 @@ class DanmakuSession:
             keywords_path.write_text(
                 json.dumps(keywords, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            raw_records = self._read_raw_records()
             highlights = summarize_highlights(raw_records, highlights)
             _, displayed_count = build_ass(raw_records, ass_path)
 

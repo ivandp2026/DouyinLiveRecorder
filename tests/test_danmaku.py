@@ -15,6 +15,8 @@ SecondStats = danmaku.SecondStats
 detect_highlights = danmaku.detect_highlights
 summarize_highlights = danmaku.summarize_highlights
 segment_events = danmaku._segment_events
+segment_rows = danmaku._segment_rows
+segment_bundle_dir = danmaku._segment_bundle_dir
 segment_output_path = danmaku._segment_output_path
 output_prefix = danmaku.output_prefix
 DanmakuSession = danmaku.DanmakuSession
@@ -43,6 +45,18 @@ class DanmakuTests(unittest.TestCase):
         self.assertEqual(
             segment_output_path(Path("record_001.ts")),
             Path("record_001.danmaku.mp4"),
+        )
+
+    def test_segment_rows_are_independent_and_start_at_zero(self):
+        rows = [SecondStats(second=i, comment_count=i) for i in range(6)]
+        selected = segment_rows(rows, 3.0, 2.0)
+        self.assertEqual([row.second for row in selected], [0, 1])
+        self.assertEqual([row.comment_count for row in selected], [3, 4])
+
+    def test_each_segment_gets_its_own_folder(self):
+        self.assertEqual(
+            segment_bundle_dir(Path("recordings/live"), Path("recordings/live_001.ts")),
+            Path("recordings/live.segments/live_001"),
         )
 
     def test_detects_and_expands_spike(self):

@@ -554,6 +554,10 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
     if danmaku_session:
         csv_path, highlight_path = danmaku_session.stop()
         logger.info(f"弹幕统计已保存: {csv_path}; 热点区间已保存: {highlight_path}")
+        if split_video_by_time:
+            danmaku_session.wait_for_render()
+            if danmaku_session.organized_sources:
+                recorded_file_paths = [str(path) for path in danmaku_session.organized_sources]
 
     if user_stopped:
         recording.discard(record_name)
@@ -564,11 +568,16 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
     if completed:
         if converts_to_mp4 and save_type == 'TS':
             if split_video_by_time:
-                file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
+                if danmaku_session and danmaku_session.organized_sources:
+                    file_paths = recorded_file_paths
+                else:
+                    file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
                 prefix = os.path.basename(save_file_path).rsplit('_', maxsplit=1)[0]
                 for path in file_paths:
                     suffix = Path(path).suffix.lower()
-                    if prefix in os.path.basename(path) and suffix in VIDEO_EXTENSIONS:
+                    if (danmaku_session and danmaku_session.organized_sources) or (
+                        prefix in os.path.basename(path) and suffix in VIDEO_EXTENSIONS
+                    ):
                         threading.Thread(target=converts_mp4, args=(path, delete_origin_file)).start()
             else:
                 for path in recorded_file_paths:
