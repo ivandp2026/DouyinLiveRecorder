@@ -1,0 +1,11 @@
+{
+  "status": "success",
+  "commit": "8c3a5a6b0f1e423c8ad4110261482a45fb6603b5",
+  "branch": "feature/danmaku-highlights",
+  "run_id": "30748293902",
+  "run_number": "22",
+  "run_url": "https://github.com/ivandp2026/DouyinLiveRecorder/actions/runs/30748293902",
+  "release_url": "https://github.com/ivandp2026/DouyinLiveRecorder/releases/tag/build19-test",
+  "download_url": "https://github.com/ivandp2026/DouyinLiveRecorder/releases/download/build19-test/LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip",
+  "updated_at": "2026-08-02T12:41:41.2451420+00:00"
+}
