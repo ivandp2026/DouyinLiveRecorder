@@ -6,6 +6,8 @@ on:
     branches:
       - feature/danmaku-highlights
       - release-build-19-danmaku-test
+    paths-ignore:
+      - BUILD19_STATUS.json
 
 permissions:
   contents: write
@@ -156,3 +158,34 @@ jobs:
           make_latest: false
           fail_on_unmatched_files: true
           files: LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip
+
+      - name: Publish machine-readable build status
+        if: always() && github.ref == 'refs/heads/feature/danmaku-highlights'
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $releaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/build19-test"
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/build19-test/LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip"
+          $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $payload = [ordered]@{
+            status = $env:JOB_STATUS
+            commit = $env:GITHUB_SHA
+            branch = $env:GITHUB_REF_NAME
+            run_id = $env:GITHUB_RUN_ID
+            run_number = $env:GITHUB_RUN_NUMBER
+            run_url = $runUrl
+            release_url = $releaseUrl
+            download_url = $downloadUrl
+            updated_at = (Get-Date -Format o)
+          }
+          $payload | ConvertTo-Json -Depth 4 | Set-Content -Path BUILD19_STATUS.json -Encoding UTF8
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add BUILD19_STATUS.json
+          $changes = git status --porcelain
+          if ($changes) {
+            git commit -m "chore(build19): publish build status [skip ci]"
+            git push origin HEAD:feature/danmaku-highlights
+          }
