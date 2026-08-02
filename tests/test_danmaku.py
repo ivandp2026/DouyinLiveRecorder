@@ -14,6 +14,8 @@ SPEC.loader.exec_module(danmaku)
 SecondStats = danmaku.SecondStats
 detect_highlights = danmaku.detect_highlights
 summarize_highlights = danmaku.summarize_highlights
+segment_events = danmaku._segment_events
+segment_output_path = danmaku._segment_output_path
 output_prefix = danmaku.output_prefix
 DanmakuSession = danmaku.DanmakuSession
 
@@ -23,6 +25,24 @@ class DanmakuTests(unittest.TestCase):
         self.assertEqual(
             output_prefix("downloads/a_2026-01-01_%03d.ts"),
             Path("downloads/a_2026-01-01"),
+        )
+
+    def test_segment_events_are_shifted_to_each_local_timeline(self):
+        events = [
+            {"second": 1799.5, "type": "chat", "text": "第一段"},
+            {"second": 1800.0, "type": "chat", "text": "第二段开头"},
+            {"second": 1805.25, "type": "chat", "text": "第二段"},
+            {"second": 3600.0, "type": "chat", "text": "第三段"},
+        ]
+        shifted = segment_events(events, 1800.0, 1800.0)
+        self.assertEqual([item["text"] for item in shifted], ["第二段开头", "第二段"])
+        self.assertEqual(shifted[0]["second"], 0.0)
+        self.assertEqual(shifted[1]["second"], 5.25)
+
+    def test_segment_output_matches_source_piece(self):
+        self.assertEqual(
+            segment_output_path(Path("record_001.ts")),
+            Path("record_001.danmaku.mp4"),
         )
 
     def test_detects_and_expands_spike(self):

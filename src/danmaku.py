@@ -357,7 +357,9 @@ def _video_candidates(video_path: Path) -> list[Path]:
     candidates = [
         path
         for path in video_path.parent.glob(pattern_name)
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        if path.is_file()
+        and path.suffix.lower() in VIDEO_EXTENSIONS
+        and ".danmaku" not in path.name
     ]
     if candidates:
         return sorted(candidates)
@@ -372,12 +374,56 @@ def _video_candidates(video_path: Path) -> list[Path]:
     return sorted(candidates)
 
 
+def _probe_duration(ffmpeg: str, source: Path) -> float | None:
+    """Read container duration using the bundled FFmpeg without decoding the file."""
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(source)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception:
+        return None
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", completed.stderr or "")
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _segment_events(
+    events: Iterable[dict], start: float, duration: float
+) -> list[dict]:
+    """Select global events for one media segment and shift them to local time."""
+    end = start + max(0.0, duration)
+    selected = []
+    for event in events:
+        try:
+            second = float(event.get("second", 0))
+        except (TypeError, ValueError):
+            continue
+        if start <= second < end:
+            local = dict(event)
+            local["second"] = max(0.0, second - start)
+            selected.append(local)
+    return selected
+
+
+def _segment_output_path(source: Path) -> Path:
+    return source.with_name(f"{source.stem}.danmaku.mp4")
+
+
 def render_danmaku_video(
     video_path: Path,
     ass_path: Path,
     output_path: Path,
     *,
     status_path: Path | None = None,
+    events: Iterable[dict] | None = None,
 ) -> dict:
     """Render a second MP4 with ASS danmaku, leaving source files untouched."""
     status = {
@@ -403,6 +449,58 @@ def render_danmaku_video(
     sources = _video_candidates(video_path)
     if not sources:
         status.update(state="skipped", error="未找到原始录制视频")
+        save_status()
+        return status
+
+    event_records = list(events) if events is not None else None
+    if len(sources) > 1 and event_records is not None:
+        offset = 0.0
+        segment_results = []
+        status.update(
+            state="rendering",
+            mode="per_segment",
+            sources=[str(path) for path in sources],
+            outputs=[],
+        )
+        save_status()
+        for index, source in enumerate(sources):
+            duration = _probe_duration(ffmpeg, source)
+            if not duration or duration <= 0:
+                segment_results.append(
+                    {
+                        "state": "failed",
+                        "source": str(source),
+                        "error": "无法读取分段视频时长，未进行可能错位的烧录",
+                    }
+                )
+                break
+            segment_ass = source.with_name(f"{source.stem}.danmaku.ass")
+            segment_output = _segment_output_path(source)
+            segment_events = _segment_events(event_records, offset, duration)
+            build_ass(segment_events, segment_ass)
+            result = render_danmaku_video(source, segment_ass, segment_output)
+            result.update(
+                segment_index=index,
+                global_start_second=round(offset, 3),
+                duration_seconds=round(duration, 3),
+                event_count=len(segment_events),
+            )
+            segment_results.append(result)
+            if result.get("state") == "completed":
+                status["outputs"].append(str(segment_output))
+            offset += duration
+            status["segments"] = segment_results
+            save_status()
+        completed_count = sum(
+            result.get("state") == "completed" for result in segment_results
+        )
+        status.update(
+            state="completed" if completed_count == len(sources) else "failed",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            completed_segments=completed_count,
+            total_segments=len(sources),
+            total_duration_seconds=round(offset, 3),
+        )
         save_status()
         return status
 
@@ -955,9 +1053,16 @@ class DanmakuSession:
 
         def worker() -> None:
             status = render_danmaku_video(
-                self.video_path, ass_path, output_path, status_path=status_path
+                self.video_path,
+                ass_path,
+                output_path,
+                status_path=status_path,
+                events=self._read_raw_records(),
             )
             report_payload["render"] = status
+            if status.get("outputs"):
+                report_payload["files"]["danmaku_videos"] = status["outputs"]
+                report_payload["files"]["danmaku_video"] = "分段录制：见 danmaku_videos"
             _write_report(report_path, report_payload)
 
         self.render_thread = threading.Thread(
