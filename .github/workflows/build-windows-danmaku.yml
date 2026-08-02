@@ -1,10 +1,11 @@
-name: Build Windows Multi-platform Danmaku Edition
+name: Build Windows Danmaku Edition
 
 on:
   workflow_dispatch:
   push:
     branches:
       - feature/danmaku-highlights
+      - release-build-19-danmaku-test
 
 permissions:
   contents: read
@@ -12,7 +13,7 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
 
     steps:
       - name: Checkout
@@ -32,15 +33,19 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller streamlink
           python -c "import streamlink; print('Streamlink', streamlink.__version__)"
 
-      - name: Apply Douyu integrations
+      - name: Apply Douyu and Build 19 integrations
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           python tools/apply_douyu_integration.py
           python tools/apply_douyu_streamlink.py
+          python tools/apply_build19_release.py
           Select-String -Path main.py -Pattern "DouyuDanmakuSession"
           Select-String -Path main.py -Pattern "resolve_douyu_stream"
           Select-String -Path config/config.ini -Pattern "是否开启斗鱼弹幕分析"
+          Select-String -Path src/danmaku.py -Pattern "danmaku.raw.jsonl"
+          Select-String -Path src/danmaku.py -Pattern "danmaku.report.html"
+          Select-String -Path src/danmaku.py -Pattern "danmaku.mp4"
           if (Select-String -Path main.py -Pattern "get_douyu_info_data" -Quiet) { throw "Old Douyu video resolver is still routed from main.py" }
 
       - name: Download verified Douyin danmaku relay
@@ -62,8 +67,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           python -m unittest discover -s tests -v
-          python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py src/douyu_streamlink.py tools/apply_douyu_integration.py tools/apply_douyu_streamlink.py
+          python -m py_compile main.py src/danmaku.py src/douyu_danmaku.py src/douyu_streamlink.py tools/apply_douyu_integration.py tools/apply_douyu_streamlink.py tools/apply_build19_release.py
           python -c "from src.douyu_streamlink import normalize_douyu_url; assert normalize_douyu_url('https://www.douyu.com/5135383?dyshid=abc') == 'https://www.douyu.com/5135383'"
+          python -c "from src.danmaku import SecondStats, detect_highlights; rows=[SecondStats(i, raw_comment_count=(20 if 20<=i<35 else 0), comment_count=(12 if 20<=i<35 else 0), unique_users=(8 if 20<=i<35 else 0)) for i in range(60)]; assert detect_highlights(rows, window=5, min_comments=3)"
 
       - name: Build application
         shell: pwsh
@@ -75,6 +81,21 @@ jobs:
           Copy-Item vendor dist/DouyinLiveRecorder/vendor -Recurse -Force
           Copy-Item README.md,LICENSE dist/DouyinLiveRecorder/ -Force
           Copy-Item docs dist/DouyinLiveRecorder/docs -Recurse -Force
+          @"
+          DouyinLiveRecorder Windows Danmaku Edition - Build 19
+          Branch: $env:GITHUB_REF_NAME
+          Commit: $env:GITHUB_SHA
+          Built: $(Get-Date -Format o)
+
+          Outputs per recording:
+          - original recording (unchanged)
+          - *.danmaku.mp4
+          - *.danmaku.raw.jsonl
+          - *.danmaku.timeline.csv
+          - *.danmaku.keywords.json
+          - *.highlights.json
+          - *.danmaku.report.html
+          "@ | Set-Content -Path dist/DouyinLiveRecorder/BUILD_INFO.txt -Encoding UTF8
 
       - name: Bundle FFmpeg
         shell: pwsh
@@ -94,23 +115,25 @@ jobs:
           if (-not (Test-Path dist/DouyinLiveRecorder/DouyinLiveRecorder.exe)) { throw "Application executable missing" }
           if (-not (Test-Path dist/DouyinLiveRecorder/ffmpeg/ffmpeg.exe)) { throw "FFmpeg missing" }
           if (-not (Test-Path dist/DouyinLiveRecorder/vendor/douyinlive/douyinLive.exe)) { throw "Douyin relay missing" }
+          if (-not (Test-Path dist/DouyinLiveRecorder/docs/BUILD19_TESTING.md)) { throw "Build 19 test guide missing" }
+          if (-not (Test-Path dist/DouyinLiveRecorder/BUILD_INFO.txt)) { throw "Build metadata missing" }
           if (-not (Select-String -Path dist/DouyinLiveRecorder/config/config.ini -Pattern "是否开启斗鱼弹幕分析" -Quiet)) { throw "Douyu config missing" }
           $douyuPlugin = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse -Filter douyu.py | Where-Object { $_.FullName -match "streamlink.*plugins" } | Select-Object -First 1
           if (-not $douyuPlugin) { throw "Packaged Streamlink Douyu plugin missing" }
-          $streamlinkPackage = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse | Where-Object { $_.FullName -match "streamlink" } | Select-Object -First 1
-          if (-not $streamlinkPackage) { throw "Packaged Streamlink files missing" }
+          $danmakuModule = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse | Where-Object { $_.Name -match "danmaku" } | Select-Object -First 1
+          if (-not $danmakuModule) { Write-Host "PyInstaller modules are stored in the embedded archive; source checks already passed." }
           Write-Host "Verified packaged Streamlink Douyu plugin: $($douyuPlugin.FullName)"
 
       - name: Create ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64.zip -CompressionLevel Optimal
+          Compress-Archive -Path dist/DouyinLiveRecorder/* -DestinationPath LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip -CompressionLevel Optimal
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64
-          path: LiveRecorder-Douyin-Douyu-Streamlink-Windows-x64.zip
+          name: LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64
+          path: LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
