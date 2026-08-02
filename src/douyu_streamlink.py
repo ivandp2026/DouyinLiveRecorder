@@ -1,6 +1,7 @@
 """Douyu video resolver backed by Streamlink's maintained Douyu plugin."""
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlparse
 
 from streamlink import Streamlink
@@ -15,6 +16,9 @@ QUALITY_ORDER = {
     "LD": ("360p", "worst"),
 }
 
+DOUYU_RECONNECT_DELAYS = (3, 5, 10, 20, 30)
+VIDEO_EXTENSIONS = {".ts", ".flv", ".mkv", ".mov", ".m4v", ".webm"}
+
 
 def normalize_douyu_url(url: str) -> str:
     parsed = urlparse(url.strip())
@@ -22,6 +26,38 @@ def normalize_douyu_url(url: str) -> str:
     if not room:
         raise ValueError(f"无法从斗鱼链接提取房间号: {url}")
     return f"https://www.douyu.com/{room}"
+
+
+def reconnect_output_path(path: str, reconnect_index: int) -> str:
+    """Return a new output path without overwriting an earlier recording part."""
+    source = Path(path)
+    marker = f"_reconnect{reconnect_index:03d}"
+    if "%03d" in source.name:
+        name = source.name.replace("%03d", f"reconnect{reconnect_index:03d}_%03d", 1)
+    else:
+        name = f"{source.stem}{marker}{source.suffix}"
+    return str(source.with_name(name))
+
+
+def refreshed_ffmpeg_command(command: list[str], stream_url: str, output_path: str) -> list[str]:
+    """Copy an FFmpeg command and replace only its input URL and output path."""
+    refreshed = list(command)
+    try:
+        input_index = refreshed.index("-i") + 1
+    except (ValueError, IndexError) as exc:
+        raise ValueError("FFmpeg 命令缺少输入参数 -i") from exc
+    refreshed[input_index] = stream_url
+    refreshed[-1] = output_path
+    return refreshed
+
+
+def ffmpeg_proxy(command: list[str]) -> str:
+    """Read the configured HTTP proxy from an FFmpeg command, if present."""
+    try:
+        proxy_index = command.index("-http_proxy") + 1
+        return command[proxy_index]
+    except (ValueError, IndexError):
+        return ""
 
 
 def resolve_douyu_stream(url: str, quality: str = "OD", cookies: str = "", proxy: str = "") -> dict:

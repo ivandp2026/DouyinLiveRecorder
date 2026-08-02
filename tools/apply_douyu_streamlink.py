@@ -11,12 +11,13 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 main_path = Path("main.py")
 main = main_path.read_text(encoding="utf-8-sig")
-main = replace_once(
-    main,
-    "from src.douyu_danmaku import DouyuDanmakuSession\n",
-    "from src.douyu_danmaku import DouyuDanmakuSession\nfrom src.douyu_streamlink import resolve_douyu_stream\n",
-    "Douyu Streamlink import",
-)
+if "from src.douyu_streamlink import (" not in main:
+    main = replace_once(
+        main,
+        "from src.douyu_danmaku import DouyuDanmakuSession\n",
+        "from src.douyu_danmaku import DouyuDanmakuSession\nfrom src.douyu_streamlink import resolve_douyu_stream\n",
+        "Douyu Streamlink import",
+    )
 old = '''                    elif record_url.find("https://www.douyu.com/") > -1:
                         platform = '斗鱼直播'
                         with semaphore:
@@ -76,7 +77,8 @@ new_conversion = '''                video_extensions = {'.ts', '.flv', '.mkv', '
                     if prefix in os.path.basename(path) and suffix in video_extensions:
                         threading.Thread(target=converts_mp4, args=(path, delete_origin_file)).start()
 '''
-main = replace_once(main, old_conversion, new_conversion, "sidecar conversion filter")
+if "suffix in VIDEO_EXTENSIONS" not in main:
+    main = replace_once(main, old_conversion, new_conversion, "sidecar conversion filter")
 
 main_path.write_text(main, encoding="utf-8-sig")
 print("Douyu recording uses Streamlink with stable reconnect and safe conversion filtering")

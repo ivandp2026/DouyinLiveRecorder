@@ -1,4 +1,4 @@
-# -*- encoding: utf-8 -*-
+﻿# -*- encoding: utf-8 -*-
 
 """
 Author: Hmily
@@ -32,6 +32,15 @@ from src.proxy import ProxyDetector
 from src.utils import logger
 from src import utils
 from src.danmaku import DanmakuSession
+from src.douyu_danmaku import DouyuDanmakuSession
+from src.douyu_streamlink import (
+    DOUYU_RECONNECT_DELAYS,
+    VIDEO_EXTENSIONS,
+    ffmpeg_proxy,
+    reconnect_output_path,
+    refreshed_ffmpeg_command,
+    resolve_douyu_stream,
+)
 from msg_push import (
     dingtalk, xizhi, tg_bot, send_email, bark, ntfy, pushplus
 )
@@ -420,27 +429,33 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
 
 
 def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
-                     script_command: str | None = None) -> bool:
+                     script_command: str | None = None, douyu_quality: str = "OD") -> bool:
     save_file_path = ffmpeg_command[-1]
-    process = subprocess.Popen(
-        ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
-    )
-
+    current_command = list(ffmpeg_command)
+    recorded_file_paths = [save_file_path]
     danmaku_session = None
-    if enable_douyin_danmaku and "douyin.com/" in record_url:
+    is_douyin = "douyin.com/" in record_url
+    is_douyu = "douyu.com/" in record_url
+    if (enable_douyin_danmaku and is_douyin) or (enable_douyu_danmaku and is_douyu):
         try:
-            danmaku_session = DanmakuSession(
-                save_file_path, douyin_room_ids.get(record_url, record_url), dy_cookie, danmaku_collector_command,
+            session_class = DouyuDanmakuSession if is_douyu else DanmakuSession
+            session_url = record_url if is_douyu else douyin_room_ids.get(record_url, record_url)
+            session_cookie = douyu_cookie if is_douyu else dy_cookie
+            session_command = "" if is_douyu else danmaku_collector_command
+            danmaku_session = session_class(
+                save_file_path, session_url, session_cookie, session_command,
                 highlight_options=danmaku_highlight_options,
                 relay_executable=danmaku_relay_executable,
                 relay_port=danmaku_relay_port,
                 duplicate_window=danmaku_duplicate_window,
             )
             danmaku_session.start()
-            logger.info(f"[{record_name}] 抖音弹幕分析已启动")
+            platform_name = "斗鱼" if is_douyu else "抖音"
+            logger.info(f"[{record_name}] {platform_name}弹幕分析已启动")
         except Exception as e:
             danmaku_session = None
-            logger.error(f"[{record_name}] 抖音弹幕分析启动失败: {e}")
+            platform_name = "斗鱼" if is_douyu else "抖音"
+            logger.error(f"[{record_name}] {platform_name}弹幕分析启动失败: {e}")
 
     subs_file_path = save_file_path.rsplit('.', maxsplit=1)[0]
     subs_thread_name = f'subs_{Path(subs_file_path).name}'
@@ -451,39 +466,113 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
         create_var[subs_thread_name].daemon = True
         create_var[subs_thread_name].start()
 
-    while process.poll() is None:
-        if record_url in url_comments or exit_recording:
-            color_obj.print_colored(f"[{record_name}]录制时已被注释,本条线程将会退出", color_obj.YELLOW)
-            clear_record_info(record_name, record_url)
-            # process.terminate()
-            if os.name == 'nt':
-                if process.stdin:
-                    process.stdin.write(b'q')
-                    process.stdin.close()
-            else:
-                process.send_signal(signal.SIGINT)
-            process.wait()
-            if danmaku_session:
-                csv_path, highlight_path = danmaku_session.stop()
-                logger.info(f"弹幕统计已保存: {csv_path}; 热点区间已保存: {highlight_path}")
-            return True
-        time.sleep(1)
+    reconnect_index = 0
+    user_stopped = False
+    confirmed_offline = False
+    return_code = 0
 
-    return_code = process.returncode
+    while True:
+        process = subprocess.Popen(
+            current_command,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            startupinfo=get_startup_info(os_type),
+        )
+        while process.poll() is None:
+            if record_url in url_comments or exit_recording:
+                color_obj.print_colored(f"[{record_name}]录制已请求停止,本条线程将会退出", color_obj.YELLOW)
+                clear_record_info(record_name, record_url)
+                if os.name == 'nt':
+                    if process.stdin:
+                        try:
+                            process.stdin.write(b'q')
+                            process.stdin.close()
+                        except (BrokenPipeError, OSError):
+                            process.terminate()
+                else:
+                    process.send_signal(signal.SIGINT)
+                process.wait()
+                user_stopped = True
+                break
+            time.sleep(1)
+
+        return_code = process.returncode
+        if user_stopped or not is_douyu:
+            break
+
+        # FFmpeg can return either success or failure when an endless HTTP-FLV
+        # response is closed. While the room is still live, always resolve a
+        # fresh signed CDN URL instead of reconnecting to the expired one.
+        refreshed = False
+        offline_observations = 0
+        for delay in DOUYU_RECONNECT_DELAYS:
+            logger.warning(
+                f"[{record_name}] 斗鱼视频流已中断(返回码: {return_code})，{delay}秒后重新获取播放地址"
+            )
+            for _ in range(delay):
+                if record_url in url_comments or exit_recording:
+                    user_stopped = True
+                    break
+                time.sleep(1)
+            if user_stopped:
+                break
+
+            try:
+                port_info = resolve_douyu_stream(
+                    record_url,
+                    quality=douyu_quality,
+                    cookies=douyu_cookie,
+                    proxy=ffmpeg_proxy(current_command),
+                )
+                if not port_info.get("is_live"):
+                    offline_observations += 1
+                    if offline_observations >= 2:
+                        confirmed_offline = True
+                        logger.info(f"[{record_name}] 已连续两次确认直播结束，停止自动续录")
+                        break
+                    logger.info(f"[{record_name}] 暂未发现直播流，将再次确认直播状态")
+                    continue
+
+                new_stream_url = select_source_url(record_url, port_info)
+                if not new_stream_url:
+                    raise RuntimeError("Streamlink 未返回可录制的斗鱼播放地址")
+
+                reconnect_index += 1
+                next_output = reconnect_output_path(save_file_path, reconnect_index)
+                current_command = refreshed_ffmpeg_command(current_command, new_stream_url, next_output)
+                recorded_file_paths.append(next_output)
+                refreshed = True
+                logger.info(f"[{record_name}] 已获取新的斗鱼播放地址，自动续录到: {next_output}")
+                break
+            except Exception as e:
+                logger.warning(f"[{record_name}] 斗鱼播放地址刷新失败: {e}")
+
+        if refreshed:
+            continue
+        break
+
     if danmaku_session:
         csv_path, highlight_path = danmaku_session.stop()
         logger.info(f"弹幕统计已保存: {csv_path}; 热点区间已保存: {highlight_path}")
+
+    if user_stopped:
+        recording.discard(record_name)
+        return True
+
     stop_time = time.strftime('%Y-%m-%d %H:%M:%S')
-    if return_code == 0:
+    completed = confirmed_offline if is_douyu else return_code == 0
+    if completed:
         if converts_to_mp4 and save_type == 'TS':
             if split_video_by_time:
                 file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
                 prefix = os.path.basename(save_file_path).rsplit('_', maxsplit=1)[0]
                 for path in file_paths:
-                    if prefix in path:
+                    suffix = Path(path).suffix.lower()
+                    if prefix in os.path.basename(path) and suffix in VIDEO_EXTENSIONS:
                         threading.Thread(target=converts_mp4, args=(path, delete_origin_file)).start()
             else:
-                threading.Thread(target=converts_mp4, args=(save_file_path, delete_origin_file)).start()
+                for path in recorded_file_paths:
+                    threading.Thread(target=converts_mp4, args=(path, delete_origin_file)).start()
         print(f"\n{record_name} {stop_time} 直播录制完成\n")
 
         if script_command:
@@ -509,7 +598,10 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
             logger.debug("脚本命令执行结束!")
 
     else:
-        color_obj.print_colored(f"\n{record_name} {stop_time} 直播录制出错,返回码: {return_code}\n", color_obj.RED)
+        color_obj.print_colored(
+            f"\n{record_name} {stop_time} 斗鱼自动续录暂时失败,返回监控循环继续重试\n",
+            color_obj.RED,
+        )
 
     recording.discard(record_name)
     return False
@@ -671,11 +763,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     elif record_url.find("https://www.douyu.com/") > -1:
                         platform = '斗鱼直播'
                         with semaphore:
-                            json_data = asyncio.run(spider.get_douyu_info_data(
-                                url=record_url, proxy_addr=proxy_address, cookies=douyu_cookie))
-                            port_info = asyncio.run(stream.get_douyu_stream_url(
-                                json_data, video_quality=record_quality, cookies=douyu_cookie, proxy_addr=proxy_address
-                            ))
+                            port_info = resolve_douyu_stream(
+                                record_url,
+                                quality=record_quality,
+                                cookies=douyu_cookie,
+                                proxy=proxy_address or "",
+                            )
 
                     elif record_url.find("https://www.yy.com/") > -1:
                         platform = 'YY直播'
@@ -1221,11 +1314,15 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-analyzeduration", analyzeduration,
                                     "-probesize", probesize,
                                     "-fflags", "+discardcorrupt",
-                                    "-re", "-i", real_url,
+                                    "-reconnect", "1",
+                                    "-reconnect_streamed", "1",
+                                    "-reconnect_at_eof", "1",
+                                    "-reconnect_on_network_error", "1",
+                                    "-reconnect_on_http_error", "4xx,5xx",
+                                    "-reconnect_delay_max", "60",
+                                    "-i", real_url,
                                     "-bufsize", bufsize,
                                     "-sn", "-dn",
-                                    "-reconnect_delay_max", "60",
-                                    "-reconnect_streamed", "-reconnect_at_eof",
                                     "-max_muxing_queue_size", max_muxing_queue_size,
                                     "-correct_ts_overflow", "1",
                                     "-avoid_negative_ts", "1"
@@ -1331,7 +1428,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            record_quality,
                                         )
                                         if comment_end:
                                             return
@@ -1423,7 +1521,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            record_quality,
                                         )
                                         if comment_end:
                                             return
@@ -1497,7 +1596,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            record_quality,
                                         )
                                         if comment_end:
                                             return
@@ -1544,7 +1644,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            record_quality,
                                         )
                                         if comment_end:
                                             return
@@ -1580,14 +1681,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                record_quality,
                                             )
                                             if comment_end:
                                                 if converts_to_mp4:
                                                     file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
                                                     prefix = os.path.basename(save_file_path).rsplit('_', maxsplit=1)[0]
                                                     for path in file_paths:
-                                                        if prefix in path:
+                                                        suffix = Path(path).suffix.lower()
+                                                        if (prefix in os.path.basename(path) and
+                                                                suffix in VIDEO_EXTENSIONS):
                                                             try:
                                                                 threading.Thread(
                                                                     target=converts_mp4,
@@ -1624,12 +1728,15 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                record_quality,
                                             )
                                             if comment_end:
-                                                threading.Thread(
-                                                    target=converts_mp4, args=(save_file_path, delete_origin_file)
-                                                ).start()
+                                                if converts_to_mp4:
+                                                    threading.Thread(
+                                                        target=converts_mp4,
+                                                        args=(save_file_path, delete_origin_file),
+                                                    ).start()
                                                 return
 
                                         except subprocess.CalledProcessError as e:
@@ -1872,6 +1979,9 @@ while True:
     extra_enable_proxy_platform_list = extra_enable_proxy.replace('，', ',').split(',') if extra_enable_proxy else None
     enable_douyin_danmaku = options.get(
         read_config_value(config, '弹幕分析', '是否开启抖音弹幕分析(是/否)', "否"), False
+    )
+    enable_douyu_danmaku = options.get(
+        read_config_value(config, '弹幕分析', '是否开启斗鱼弹幕分析(是/否)', "是"), True
     )
     danmaku_collector_command = read_config_value(config, '弹幕分析', '弹幕采集命令', "")
     danmaku_relay_executable = read_config_value(
