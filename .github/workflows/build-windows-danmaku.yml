@@ -8,7 +8,7 @@ on:
       - release-build-19-danmaku-test
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -120,8 +120,6 @@ jobs:
           if (-not (Select-String -Path dist/DouyinLiveRecorder/config/config.ini -Pattern "是否开启斗鱼弹幕分析" -Quiet)) { throw "Douyu config missing" }
           $douyuPlugin = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse -Filter douyu.py | Where-Object { $_.FullName -match "streamlink.*plugins" } | Select-Object -First 1
           if (-not $douyuPlugin) { throw "Packaged Streamlink Douyu plugin missing" }
-          $danmakuModule = Get-ChildItem dist/DouyinLiveRecorder/_internal -Recurse | Where-Object { $_.Name -match "danmaku" } | Select-Object -First 1
-          if (-not $danmakuModule) { Write-Host "PyInstaller modules are stored in the embedded archive; source checks already passed." }
           Write-Host "Verified packaged Streamlink Douyu plugin: $($douyuPlugin.FullName)"
 
       - name: Create ZIP
@@ -137,3 +135,24 @@ jobs:
           path: LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish Build 19 test package
+        if: github.ref == 'refs/heads/feature/danmaku-highlights'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build19-test
+          name: Build 19 Windows Danmaku Test Package
+          body: |
+            Build 19 test package based on the successful Build 18 Douyu recorder.
+
+            Added:
+            - original recording remains unchanged
+            - second MP4 with synchronized danmaku
+            - raw JSONL event records
+            - per-second heat timeline CSV
+            - keywords and highlight ranges
+            - standalone HTML report
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: LiveRecorder-Douyin-Douyu-Danmaku-Build19-Windows-x64.zip
