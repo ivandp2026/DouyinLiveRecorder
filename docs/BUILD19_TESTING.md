@@ -28,6 +28,16 @@
 
 原始录制文件不会被覆盖或删除。
 
+## 哪些文件需要保留
+
+- 建议长期保留：原始录制、`*.danmaku.mp4`、`*.danmaku.report.html`。
+- 想以后重新分析时保留：`*.danmaku.raw.jsonl`（这是完整原始数据，最重要的数据源）。
+- 仅供表格或程序分析：`*.danmaku.timeline.csv`、`*.danmaku.keywords.json`、`*.highlights.json`。
+- 渲染辅助文件：`*.danmaku.ass`、`*.danmaku.render.json`；确认弹幕视频已成功生成后可以删除。
+- `*.danmaku.txt` 是方便人工阅读的弹幕文本，可按需保留。
+
+HTML 报告的热度曲线支持鼠标悬停，会显示准确的 `HH:MM:SS`、秒数、热度和弹幕量。每个热点区间下方还会显示仅根据该区间文字弹幕生成的离线内容摘要、代表弹幕和参与用户数。
+
 ## 热度字段
 
 `danmaku.timeline.csv` 包含：

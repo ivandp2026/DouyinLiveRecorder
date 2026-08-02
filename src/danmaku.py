@@ -196,7 +196,7 @@ def detect_highlights(
         return []
     _compute_heat(values)
     scores = [row.heat_score for row in values]
-    raw_counts = [row.raw_comment_count for row in values]
+    raw_counts = [row.raw_comment_count or row.comment_count for row in values]
     hot: list[int] = []
     for index in range(len(scores)):
         start = max(0, index - window + 1)
@@ -208,19 +208,6 @@ def detect_highlights(
         threshold = max(float(min_comments), baseline * multiplier)
         if len(current) == window and current_avg >= threshold:
             hot.append(index)
-    if not hot:
-        candidates = sorted(
-            (i for i, score in enumerate(scores) if score > 0),
-            key=lambda i: scores[i],
-            reverse=True,
-        )
-        chosen: list[int] = []
-        for index in candidates:
-            if all(abs(index - other) >= max(10, window) for other in chosen):
-                chosen.append(index)
-            if len(chosen) >= 3:
-                break
-        hot = sorted(chosen)
     if not hot:
         return []
 
@@ -533,6 +520,53 @@ def _keyword_tokens(text: str) -> list[str]:
     return result
 
 
+def summarize_highlights(records: Iterable[dict], highlights: Iterable[dict]) -> list[dict]:
+    """Attach an extractive, offline content summary to every highlight range."""
+    chats = []
+    for record in records:
+        if str(record.get("type") or "") not in CHAT_TYPES:
+            continue
+        text = " ".join(str(record.get("text") or record.get("content") or "").split())
+        if not text:
+            continue
+        try:
+            second = max(0, int(float(record.get("second", 0))))
+        except (TypeError, ValueError):
+            continue
+        chats.append((second, text, str(record.get("user_id") or record.get("user") or "")))
+
+    result = []
+    for original in highlights:
+        item = dict(original)
+        start, end = int(item.get("start", 0)), int(item.get("end", 0))
+        selected = [(text, user) for second, text, user in chats if start <= second <= end]
+        text_counts = Counter(text for text, _ in selected)
+        token_counts = Counter(
+            token for text, _ in selected for token in _keyword_tokens(text)
+        )
+        topics = [word for word, _ in token_counts.most_common(5)]
+        representatives = [text for text, _ in text_counts.most_common(3)]
+        users = {user for _, user in selected if user}
+        if topics and representatives:
+            summary = (
+                f"内容集中在「{'、'.join(topics)}」；代表弹幕："
+                + "；".join(f"“{text}”" for text in representatives)
+            )
+        elif representatives:
+            summary = "代表弹幕：" + "；".join(f"“{text}”" for text in representatives)
+        else:
+            summary = "该区间没有可用于内容总结的文字弹幕。"
+        item.update(
+            comment_count=len(selected),
+            unique_users=len(users),
+            topics=topics,
+            representative_comments=representatives,
+            content_summary=summary,
+        )
+        result.append(item)
+    return result
+
+
 def _write_report(path: Path, payload: dict) -> None:
     timeline = payload.get("timeline", [])
     highlights = payload.get("highlights", [])
@@ -544,10 +578,11 @@ def _write_report(path: Path, payload: dict) -> None:
         step = max(1, math.ceil(len(timeline) / target_points))
         for index in range(0, len(timeline), step):
             window = timeline[index : index + step]
+            peak_row = max(window, key=lambda row: float(row.get("heat_score", 0)))
             chart_points.append(
                 {
-                    "second": index,
-                    "heat": max(float(row.get("heat_score", 0)) for row in window),
+                    "second": int(peak_row.get("second", index)),
+                    "heat": float(peak_row.get("heat_score", 0)),
                     "comments": sum(int(row.get("raw_comment_count", 0)) for row in window),
                 }
             )
@@ -576,24 +611,26 @@ main{max-width:1280px;margin:auto;padding:24px}.top{display:flex;justify-content
 h1{margin:0 0 6px;font-size:28px}.muted{color:var(--muted)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:20px 0}
 .card,.panel{background:var(--card);border:1px solid #26304a;border-radius:14px;padding:16px;box-shadow:0 10px 35px #0003}
 .value{font-size:28px;font-weight:700;margin-top:6px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}.panel{margin-bottom:16px}
-canvas{width:100%;height:290px;display:block}.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{padding:7px 10px;background:#243052;border-radius:999px}
+canvas{width:100%;height:290px;display:block;cursor:crosshair}.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{padding:7px 10px;background:#243052;border-radius:999px}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #2a3552}th{color:var(--muted)}
-a{color:#9fb4ff}.status{padding:4px 9px;border-radius:999px;background:#243052}.hot{color:var(--hot);font-weight:700}
+a{color:#9fb4ff}.status{padding:4px 9px;border-radius:999px;background:#243052}.hot{color:var(--hot);font-weight:700}.range-summary{min-width:300px;line-height:1.55}.range-meta{font-size:12px;margin-top:5px}
 @media(max-width:850px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body><main>
 <div class="top"><div><h1>__TITLE__</h1><div class="muted" id="generated"></div></div><div class="status" id="renderStatus">弹幕视频：读取状态中</div></div>
 <section class="cards" id="cards"></section>
-<section class="panel"><h2>热度曲线</h2><canvas id="chart"></canvas><div class="muted">横轴为录制时间，曲线由弹幕量、参与用户、礼物与重复率综合计算。</div></section>
+<section class="panel"><h2>热度曲线</h2><canvas id="chart" aria-label="可悬停查看秒数的热度曲线"></canvas><div class="muted">鼠标移到曲线上可查看准确秒数、热度和弹幕量；横轴为录制时间。</div></section>
 <div class="grid">
-<section class="panel"><h2>热点区间</h2><table><thead><tr><th>区间</th><th>峰值</th><th>弹幕</th><th>热度</th></tr></thead><tbody id="highlights"></tbody></table></section>
+<section class="panel"><h2>热点区间与内容总结</h2><table><thead><tr><th>区间</th><th>峰值</th><th>弹幕</th><th>热度</th><th>内容总结</th></tr></thead><tbody id="highlights"></tbody></table></section>
 <section class="panel"><h2>关键词</h2><div class="chips" id="keywords"></div></section>
 </div>
 <section class="panel"><h2>输出文件</h2><div id="files"></div></section>
 <script>
 const data=__DATA__;
 const s=data.summary||{};
+const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const clock=value=>{const total=Math.max(0,Math.round(Number(value)||0)),h=Math.floor(total/3600),m=Math.floor(total%3600/60),sec=total%60;return [h,m,sec].map(v=>String(v).padStart(2,'0')).join(':')};
 document.getElementById('generated').textContent=`生成时间：${s.generated_at||''} ｜ 时长：${s.duration_text||''}`;
 const cards=[
  ['原始弹幕',s.raw_comment_count||0],['有效弹幕',s.filtered_comment_count||0],
@@ -601,13 +638,13 @@ const cards=[
  ['热点区间',(data.highlights||[]).length],['重复率',`${((s.repeat_ratio||0)*100).toFixed(1)}%`]
 ];
 document.getElementById('cards').innerHTML=cards.map(([k,v])=>`<div class="card"><div class="muted">${k}</div><div class="value">${v}</div></div>`).join('');
-document.getElementById('highlights').innerHTML=(data.highlights||[]).map((h,i)=>`<tr><td><span class="hot">#${i+1}</span> ${h.start_time}–${h.end_time}</td><td>${h.peak_time}</td><td>${h.total_comments}</td><td>${h.peak_heat_score}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">暂未检测到明显热点</td></tr>';
-document.getElementById('keywords').innerHTML=(data.keywords||[]).slice(0,50).map(k=>`<span class="chip">${k.word} · ${k.count}</span>`).join('')||'<span class="muted">暂无关键词</span>';
-document.getElementById('files').innerHTML=Object.entries(data.files||{}).map(([k,v])=>`<div><b>${k}</b>：<code>${v}</code></div>`).join('');
+document.getElementById('highlights').innerHTML=(data.highlights||[]).map((h,i)=>`<tr><td><span class="hot">#${i+1}</span> ${esc(h.start_time)}–${esc(h.end_time)}</td><td>${esc(h.peak_time)}</td><td>${h.total_comments}</td><td>${h.peak_heat_score}</td><td class="range-summary">${esc(h.content_summary||'暂无文字弹幕摘要')}<div class="muted range-meta">${h.comment_count||0} 条文字弹幕 · ${h.unique_users||0} 位用户</div></td></tr>`).join('')||'<tr><td colspan="5" class="muted">暂未检测到明显热点</td></tr>';
+document.getElementById('keywords').innerHTML=(data.keywords||[]).slice(0,50).map(k=>`<span class="chip">${esc(k.word)} · ${k.count}</span>`).join('')||'<span class="muted">暂无关键词</span>';
+document.getElementById('files').innerHTML=Object.entries(data.files||{}).map(([k,v])=>`<div><b>${esc(k)}</b>：<code>${esc(v)}</code></div>`).join('');
 const rs=data.render||{};document.getElementById('renderStatus').textContent=`弹幕视频：${rs.state||'pending'}`;
-const canvas=document.getElementById('chart'),ctx=canvas.getContext('2d'),points=data.chart||[];
-function draw(){const dpr=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=w*dpr;canvas.height=h*dpr;ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);ctx.strokeStyle='#33405f';ctx.beginPath();for(let i=0;i<5;i++){let y=20+i*(h-40)/4;ctx.moveTo(44,y);ctx.lineTo(w-12,y)}ctx.stroke();if(!points.length)return;ctx.strokeStyle='#7c9cff';ctx.lineWidth=2;ctx.beginPath();points.forEach((p,i)=>{const x=44+i*(w-60)/Math.max(1,points.length-1),y=h-20-(p.heat/(data.maxHeat||1))*(h-40);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.fillStyle='#98a2b3';ctx.font='12px sans-serif';ctx.fillText('0',18,h-18);ctx.fillText(String(Math.round(data.maxHeat||0)),8,24)}
-addEventListener('resize',draw);draw();
+const canvas=document.getElementById('chart'),ctx=canvas.getContext('2d'),points=data.chart||[];let hoverIndex=-1;
+function draw(){const dpr=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=w*dpr;canvas.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.strokeStyle='#33405f';ctx.beginPath();for(let i=0;i<5;i++){let y=20+i*(h-40)/4;ctx.moveTo(44,y);ctx.lineTo(w-12,y)}ctx.stroke();if(!points.length)return;ctx.strokeStyle='#7c9cff';ctx.lineWidth=2;ctx.beginPath();points.forEach((p,i)=>{const x=44+i*(w-60)/Math.max(1,points.length-1),y=h-20-(p.heat/(data.maxHeat||1))*(h-40);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.fillStyle='#98a2b3';ctx.font='12px sans-serif';ctx.fillText('0',18,h-18);ctx.fillText(String(Math.round(data.maxHeat||0)),8,24);ctx.fillText(clock(points[0].second),44,h-4);const endLabel=clock(points[points.length-1].second),endWidth=ctx.measureText(endLabel).width;ctx.fillText(endLabel,w-12-endWidth,h-4);if(hoverIndex<0)return;const p=points[hoverIndex],x=44+hoverIndex*(w-60)/Math.max(1,points.length-1),y=h-20-(p.heat/(data.maxHeat||1))*(h-40);ctx.strokeStyle='#ffb454';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,20);ctx.lineTo(x,h-20);ctx.stroke();ctx.fillStyle='#ffb454';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();const label=`${clock(p.second)}（${p.second}秒）  热度 ${Number(p.heat).toFixed(1)}  弹幕 ${p.comments}`,pad=8,boxW=ctx.measureText(label).width+pad*2,boxX=Math.min(Math.max(4,x-boxW/2),w-boxW-4);ctx.fillStyle='#080d19eF';ctx.fillRect(boxX,4,boxW,28);ctx.fillStyle='#fff';ctx.fillText(label,boxX+pad,22)}
+canvas.addEventListener('mousemove',event=>{const rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left;hoverIndex=Math.max(0,Math.min(points.length-1,Math.round((x-44)/Math.max(1,rect.width-60)*Math.max(1,points.length-1))));draw()});canvas.addEventListener('mouseleave',()=>{hoverIndex=-1;draw()});addEventListener('resize',draw);draw();
 </script></main></body></html>"""
     path.write_text(
         document.replace("__TITLE__", title).replace("__DATA__", json_blob),
@@ -902,6 +939,19 @@ class DanmakuSession:
         ass_path = Path(report_payload["files"]["ass"])
         output_path = Path(report_payload["files"]["danmaku_video"])
         status_path = Path(report_payload["files"]["render_status"])
+        if not _video_candidates(self.video_path):
+            status = {
+                "state": "skipped",
+                "source": str(self.video_path),
+                "output": str(output_path),
+                "error": "未找到原始录制视频",
+            }
+            status_path.write_text(
+                json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            report_payload["render"] = status
+            _write_report(report_path, report_payload)
+            return
 
         def worker() -> None:
             status = render_danmaku_video(
@@ -974,6 +1024,7 @@ class DanmakuSession:
                 json.dumps(keywords, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             raw_records = self._read_raw_records()
+            highlights = summarize_highlights(raw_records, highlights)
             _, displayed_count = build_ass(raw_records, ass_path)
 
             total_raw = sum(row.raw_comment_count for row in self.rows)

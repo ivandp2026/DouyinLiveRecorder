@@ -13,6 +13,7 @@ sys.modules[SPEC.name] = danmaku
 SPEC.loader.exec_module(danmaku)
 SecondStats = danmaku.SecondStats
 detect_highlights = danmaku.detect_highlights
+summarize_highlights = danmaku.summarize_highlights
 output_prefix = danmaku.output_prefix
 DanmakuSession = danmaku.DanmakuSession
 
@@ -40,6 +41,35 @@ class DanmakuTests(unittest.TestCase):
     def test_no_false_positive_for_steady_chat(self):
         rows = [SecondStats(i, comment_count=3) for i in range(120)]
         self.assertEqual(detect_highlights(rows, min_comments=5), [])
+
+    def test_highlight_content_summary_uses_only_range_chat(self):
+        highlights = [{"start": 10, "end": 20}]
+        records = [
+            {"type": "chat", "second": 9, "text": "区间外内容", "user_id": "0"},
+            {"type": "chat", "second": 12, "text": "华东太强了", "user_id": "1"},
+            {"type": "chat", "second": 14, "text": "华东太强了", "user_id": "2"},
+            {"type": "chat", "second": 18, "text": "享受比赛", "user_id": "1"},
+            {"type": "gift", "second": 15, "text": "火箭", "user_id": "3"},
+        ]
+        result = summarize_highlights(records, highlights)[0]
+        self.assertEqual(result["comment_count"], 3)
+        self.assertEqual(result["unique_users"], 2)
+        self.assertIn("华东太强了", result["content_summary"])
+        self.assertNotIn("区间外内容", result["content_summary"])
+        self.assertNotIn("火箭", result["content_summary"])
+
+    def test_report_includes_hover_seconds_and_content_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.html"
+            danmaku._write_report(report, {
+                "summary": {"title": "测试报告"},
+                "timeline": [{"second": 40, "heat_score": 12, "raw_comment_count": 3}],
+                "highlights": [{"content_summary": "主要讨论比赛"}],
+            })
+            content = report.read_text(encoding="utf-8")
+            self.assertIn("鼠标移到曲线上可查看准确秒数", content)
+            self.assertIn("内容总结", content)
+            self.assertIn("p.second", content)
 
     def test_relay_url_contains_room_and_encoded_cookie(self):
         session = DanmakuSession(
