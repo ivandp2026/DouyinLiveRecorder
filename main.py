@@ -111,6 +111,29 @@ def signal_handler(_signal, _frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+# PyInstaller/PowerShell can terminate a native console application before
+# Python's SIGINT callback runs. Register the Windows console callback last so
+# it receives CTRL_C_EVENT first and keeps the process alive for finalization.
+_windows_console_handler = None
+if os.name == "nt":
+    try:
+        import ctypes
+
+        _console_handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+        @_console_handler_type
+        def _handle_windows_console_event(event_type):
+            if event_type in (0, 1):  # CTRL_C_EVENT / CTRL_BREAK_EVENT
+                signal_handler(signal.SIGINT, None)
+                return True
+            return False
+
+        _windows_console_handler = _handle_windows_console_event
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_windows_console_handler, True):
+            raise ctypes.WinError()
+    except Exception as exc:
+        print(f"Windows Ctrl+C 安全停止处理器安装失败: {exc}")
+
 
 def display_info() -> None:
     global start_display_time
