@@ -374,25 +374,39 @@ def _video_candidates(video_path: Path) -> list[Path]:
     return sorted(candidates)
 
 
-def _probe_duration(ffmpeg: str, source: Path) -> float | None:
-    """Read container duration using the bundled FFmpeg without decoding the file."""
-    try:
-        completed = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", str(source)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+def _probe_duration(
+    ffmpeg: str,
+    source: Path,
+    *,
+    attempts: int = 1,
+    retry_delay: float = 0.5,
+) -> float | None:
+    """Read duration, retrying while FFmpeg finishes and releases the last segment."""
+    for attempt in range(max(1, attempts)):
+        try:
+            completed = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(source)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception:
+            completed = None
+        match = re.search(
+            r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+            completed.stderr or "" if completed else "",
         )
-    except Exception:
-        return None
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", completed.stderr or "")
-    if not match:
-        return None
-    hours, minutes, seconds = match.groups()
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        if match:
+            hours, minutes, seconds = match.groups()
+            duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            if duration > 0:
+                return duration
+        if attempt + 1 < max(1, attempts):
+            time.sleep(max(0.0, retry_delay))
+    return None
 
 
 def _segment_events(
@@ -1225,8 +1239,20 @@ class DanmakuSession:
         ffmpeg = _find_ffmpeg()
         if not ffmpeg:
             return None
-        source_durations = [(source, _probe_duration(ffmpeg, source)) for source in sources]
-        if any(not duration or duration <= 0 for _, duration in source_durations):
+        source_durations = [
+            (source, _probe_duration(ffmpeg, source, attempts=10, retry_delay=0.5))
+            for source in sources
+            if source.stat().st_size > 0
+        ]
+        failed_sources = [source for source, duration in source_durations if not duration or duration <= 0]
+        if failed_sources:
+            print(
+                "分段自动分类暂未执行：无法读取以下视频时长："
+                + ", ".join(str(source) for source in failed_sources)
+            )
+            return None
+        if not source_durations:
+            print("分段自动分类暂未执行：没有找到已完成封装的视频分段。")
             return None
         offset = 0.0
         jobs = []
@@ -1483,8 +1509,9 @@ def _finalize_active_sessions() -> None:
     for session in sessions:
         try:
             session.stop()
-        except Exception:
-            pass
+            session.wait_for_render()
+        except Exception as exc:
+            print(f"退出时整理弹幕文件失败: {exc}")
 
 
 atexit.register(_finalize_active_sessions)
