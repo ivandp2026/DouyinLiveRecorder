@@ -1,11 +1,14 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.danmaku import (
     SecondStats,
     _compute_heat,
     _keyword_tokens,
+    _probe_duration,
     build_ass,
     detect_highlights,
     output_prefix,
@@ -61,6 +64,18 @@ class DanmakuOutputTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8-sig")
             self.assertIn("[Events]", text)
             self.assertIn("Dialogue:", text)
+
+    def test_probe_duration_retries_until_last_segment_is_finalized(self):
+        unfinished = subprocess.CompletedProcess([], 1, "", "Duration: N/A")
+        finished = subprocess.CompletedProcess([], 1, "", "Duration: 00:30:00.25")
+        with patch("src.danmaku.subprocess.run", side_effect=[unfinished, finished]) as run:
+            with patch("src.danmaku.time.sleep") as sleep:
+                duration = _probe_duration(
+                    "ffmpeg", Path("live_001.ts"), attempts=2, retry_delay=0.01
+                )
+        self.assertEqual(duration, 1800.25)
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.01)
 
     def test_keywords_ignore_common_noise(self):
         words = _keyword_tokens("这个主播真的可以，精彩操作太厉害了")
