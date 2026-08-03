@@ -69,6 +69,8 @@ text_no_repeat_url = []
 create_var = locals()
 first_start = True
 exit_recording = False
+shutdown_requested = threading.Event()
+signal_count = 0
 need_update_line_list = []
 first_run = True
 not_record_list = []
@@ -92,9 +94,21 @@ os.environ['PATH'] = ffmpeg_path + os.pathsep + current_env_path
 
 
 def signal_handler(_signal, _frame):
-    sys.exit(0)
+    """Request one graceful shutdown; a second signal forces termination."""
+    global exit_recording, signal_count
+    signal_count += 1
+    if signal_count > 1:
+        print("\n再次收到 Ctrl+C，正在强制退出；未完成的整理可能会丢失。")
+        os._exit(130)
+    exit_recording = True
+    shutdown_requested.set()
+    print(
+        "\n已收到 Ctrl+C：正在安全结束录制、封装最后一个分段并自动分类。"
+        "\n请不要再次按 Ctrl+C 或关闭窗口，弹幕视频渲染完成后程序会自动退出。"
+    )
 
 
+signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
@@ -671,6 +685,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
 
     while True:
+        if exit_recording:
+            return
         try:
             record_finished = False
             run_once = False
@@ -700,6 +716,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             # print(f'\r代理地址:{proxy_address}')
             # print(f'\r全局代理:{global_proxy}')
             while True:
+                if exit_recording:
+                    return
                 try:
                     port_info = []
                     if record_url.find("douyin.com/") > -1:
@@ -1784,6 +1802,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                 # 这里是正常循环
                 while x:
+                    if exit_recording:
+                        return
                     x = x - 1
                     if loop_time:
                         print(f'\r{anchor_name}循环等待{x}秒 ', end="")
@@ -2302,6 +2322,8 @@ while True:
 
         if len(text_no_repeat_url) > 0:
             for url_tuple in text_no_repeat_url:
+                if exit_recording:
+                    break
                 monitoring = len(running_list)
 
                 if url_tuple[1] in not_record_list:
@@ -2328,5 +2350,19 @@ while True:
         t2 = threading.Thread(target=adjust_max_request, args=(), daemon=True)
         t2.start()
         first_run = False
+
+    if shutdown_requested.is_set():
+        active_record_threads = [
+            thread for name, thread in list(create_var.items())
+            if name.startswith("thread_")
+            and isinstance(thread, threading.Thread)
+            and thread.is_alive()
+        ]
+        if active_record_threads:
+            print(f"正在等待 {len(active_record_threads)} 个录制任务完成封装、渲染和分类...")
+        for thread in active_record_threads:
+            thread.join()
+        print("全部录制任务已安全结束，分段文件已完成自动分类。")
+        break
 
     time.sleep(3)
